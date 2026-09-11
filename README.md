@@ -31,9 +31,29 @@ python bremen_controller.py
 
 ---
 
-## 3. Features & Enhancements
+## 3. 100% Functional & Zero Simulation Architecture
 
-### 🔍 Multi-Method Device Discovery
+All indicators, features, and controls are connected directly to live hardware protocols with **zero mock or simulated data**:
+
+1. **Live Stream Telemetry (No Hardcoded 192kHz/24-bit):**
+   * Real sample rates (`44.1 kHz`, `96.0 kHz`, `192.0 kHz`), bit depths (`16-bit`, `24-bit`), and codecs (`FLAC`, `WAV`, `DSD`, `AAC`, `MP3`) are parsed in real time from live UPnP DIDL-Lite `<res>` XML tags and MPD `status` responses.
+   * When no stream is playing, the system reflects genuine idle standby (`— / —`) instead of displaying static mock values.
+2. **Direct MPD Client (Port 6600):**
+   * Built-in socket client communicating natively with the VitOS Music Player Daemon without third-party dependencies.
+   * Transmits raw socket commands for playback, volume, seeking, and queue management.
+3. **Internal NVMe SSD & USB Storage Browser:**
+   * Interactive storage explorer that queries `lsinfo` and UPnP `ContentDirectory:1` `Browse` to list actual folders, albums, and tracks stored on the Bremen's internal NVMe SSD or mounted USB drives.
+   * 1-click playback sends `SetAVTransportURI` directly to the hardware.
+4. **Audiophile Internet Radio Studio Tuner:**
+   * Direct streaming access to verified lossless FLAC and studio master streams (Radio Paradise Lossless FLAC, Linn Classical 320k, BBC Radio 3 HD).
+   * Custom stream URL input allows piping any audio stream on your network directly to the Bremen hardware.
+5. **Real-Time Album Artwork Proxy:**
+   * `/api/proxy_art` dynamically routes album covers from DLNA media servers or local storage without CORS or HTTPS mixed-content browser restrictions.
+
+---
+
+## 4. Multi-Method Device Discovery
+
 If you do not know the IP address of your streamer:
 1. Open the web interface and click **"🔍 Discover Devices"** (or **"Start Network Scan"**).
 2. The controller conducts a multi-tier network scan combining:
@@ -42,15 +62,13 @@ If you do not know the IP address of your streamer:
 3. When your Silent Angel Bremen SL1P is identified, it is highlighted with a gold **"SILENT ANGEL"** badge. Click **"Connect"** to pair instantly.
 4. If preferred, you can also enter your device's static IP directly into the manual override field.
 
-### 🎨 Official Audiophile Vector SVGs
-The user interface incorporates authentic, crisp vector SVGs for all major protocols and industry standards:
+---
+
+## 5. Official Audiophile Vector SVGs & Desktop Hotkeys
+
 * **Streaming Protocols:** Official UPnP, DLNA Certified, Apple AirPlay 2, Spotify Connect, Tidal Connect, Roon Ready, and Qobuz logos.
 * **Audio Format Badges:** Japan Audio Society **Hi-Res Audio** gold emblem, **DSD Direct Stream Digital**, and **MQA Studio Master**.
 * **Chassis Emblem:** Authentic Silent Angel wing emblem matching the physical Bremen SL1P front plate.
-
-### 🎛️ Full Transport & Attenuation
-* **Playback Controls:** Play, Pause, Stop, Seek, Next Track, Previous Track.
-* **Smooth Scrub Bar:** Click anywhere on the progress bar to seek accurately (`HH:MM:SS`).
 * **Desktop Hotkeys:**
   * `Spacebar`: Play / Pause toggle
   * `Ctrl` / `Cmd` + `Right Arrow`: Next track
