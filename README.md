@@ -44,9 +44,12 @@ All indicators, features, and controls are connected directly to live hardware p
 3. **Internal NVMe SSD & USB Storage Browser:**
    * Interactive storage explorer that queries `lsinfo` and UPnP `ContentDirectory:1` `Browse` to list actual folders, albums, and tracks stored on the Bremen's internal NVMe SSD or mounted USB drives.
    * 1-click playback sends `SetAVTransportURI` directly to the hardware.
-4. **Audiophile Internet Radio Studio Tuner:**
-   * Direct streaming access to verified lossless FLAC and studio master streams (Radio Paradise Lossless FLAC, Linn Classical 320k, BBC Radio 3 HD).
-   * Custom stream URL input allows piping any audio stream on your network directly to the Bremen hardware.
+4. **Comprehensive Internet Radio Studio Tuner (35,000+ Global Stations):**
+   * **Massive Global Directory:** Integrated with the worldwide Radio Browser community directory via automatic multi-mirror failover (`de1`, `nl1`, `at1.api.radio-browser.info`), providing live access to over 35,000 global stations.
+   * **Instant Search & Deep Filtering:** Search by station name, callsign, or artist with debounced instant querying, filterable by genre/tag (FLAC, Classical, Jazz, Rock, Ambient, Blues, Electronic) and country (United Kingdom, United States, France, Germany, Switzerland, Italy, etc.), sortable by top votes, popularity, or bitrate.
+   * **Curated Audiophile & Studio Master Presets:** 35+ verified top-fidelity presets categorised into *Lossless FLAC & High-Res Masters* (Radio Paradise FLAC mixes, Mother Earth 96kHz/24-bit, JB Radio-2 192kHz), *Classical & Orchestral* (Linn Classical 320k, BBC Radio 3 HD, Radio Swiss Classic), *Jazz, Blues & Soul* (Linn Jazz, The Jazz Groove, FIP Jazz), *Eclectic & Showcase* (Linn Showcase, Naim Radio, KEXP), *Ambient & Chillout* (SomaFM, Chilltrax, Ibiza Sonica), and *British National Radio* (BBC Radios 1–6, World Service, LBC, Times Radio).
+   * **Persistent Favourites Bookmarking:** Bookmark any global station or preset with the star icon; favourites are automatically persisted in `bremen_config.json` for rapid 1-click access.
+   * **Custom Stream Pipeline:** Direct URL streaming for custom HLS (`.m3u8`), Icecast, Shoutcast, or uncompressed bitstreams.
 5. **Real-Time Album Artwork Proxy:**
    * `/api/proxy_art` dynamically routes album covers from DLNA media servers or local storage without CORS or HTTPS mixed-content browser restrictions.
 

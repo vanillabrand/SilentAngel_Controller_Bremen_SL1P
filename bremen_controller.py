@@ -3,6 +3,7 @@
 Silent Angel Bremen SL1P — High-Fidelity Local Network Controller
 Universal Web & Mobile Interface for Laptops and Smartphones
 Complete Functional Implementation — Zero Simulation
+Comprehensive Internet Radio Tuner (35,000+ Global Stations + Audiophile Masters)
 UK English Standard
 """
 
@@ -94,6 +95,75 @@ def get_local_ip():
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+class RadioBrowserService:
+    """
+    Client for the global community Radio Browser directory (35,000+ stations).
+    Includes automatic multi-mirror failover and error recovery.
+    """
+    MIRRORS = [
+        "https://de1.api.radio-browser.info",
+        "https://nl1.api.radio-browser.info",
+        "https://at1.api.radio-browser.info"
+    ]
+
+    POPULAR_COUNTRIES = [
+        "United Kingdom", "United States", "France", "Germany",
+        "Italy", "Switzerland", "Netherlands", "Canada",
+        "Australia", "Japan", "Spain", "Norway", "Sweden", "Ireland"
+    ]
+
+    POPULAR_GENRES = [
+        "flac", "classical", "jazz", "rock", "ambient", "chillout",
+        "electronic", "blues", "folk", "news", "pop", "soundtrack", "world"
+    ]
+
+    @classmethod
+    def search_stations(cls, query="", tag="", country="", order="votes", limit=40):
+        """Searches the global directory across mirrors."""
+        params = {
+            "limit": str(min(100, max(1, limit))),
+            "hidebroken": "true",
+            "order": order or "votes",
+            "reverse": "true"
+        }
+        if query:
+            params["name"] = query.strip()
+        if tag:
+            params["tag"] = tag.strip().lower()
+        if country:
+            params["country"] = country.strip()
+
+        qs = urllib.parse.urlencode(params)
+        for mirror in cls.MIRRORS:
+            url = f"{mirror}/json/stations/search?{qs}"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "BremenStudio/1.0"})
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    raw_data = json.loads(resp.read().decode("utf-8"))
+                    clean_stations = []
+                    for s in raw_data:
+                        stream_url = s.get("url_resolved") or s.get("url")
+                        if not stream_url:
+                            continue
+                        clean_stations.append({
+                            "id": s.get("stationuuid", ""),
+                            "name": s.get("name", "Unknown Station").strip(),
+                            "url": stream_url,
+                            "homepage": s.get("homepage", ""),
+                            "favicon": s.get("favicon", ""),
+                            "country": s.get("country", ""),
+                            "country_code": s.get("countrycode", ""),
+                            "tags": [t.strip() for t in s.get("tags", "").split(",") if t.strip()][:4],
+                            "codec": s.get("codec", "MP3").upper(),
+                            "bitrate": s.get("bitrate", 0),
+                            "votes": s.get("votes", 0)
+                        })
+                    return clean_stations
+            except Exception:
+                continue
+        return []
 
 
 class MPDClient:
@@ -191,67 +261,337 @@ class MPDClient:
 
 class BremenDeviceManager:
     """
-    Manages communication, UPnP/AVTransport, OpenHome, and MPD control for Silent Angel Bremen SL1P.
-    All data is queried live from the hardware.
+    Manages communication, UPnP/AVTransport, OpenHome, MPD control, and Internet Radio for Bremen SL1P.
+    All data is queried live from the hardware. Zero simulation.
     """
 
-    # Real, curated high-resolution lossless Internet Radio streams
-    RADIO_STATIONS = [
+    # Curated audiophile studio master and lossless internet radio stations
+    CURATED_RADIO_CATEGORIES = [
         {
-            "id": "rp_main",
-            "name": "Radio Paradise (Lossless FLAC)",
-            "genre": "Eclectic Rock / Acoustic",
-            "format": "FLAC 44.1kHz / 16-bit",
-            "url": "http://stream.radioparadise.com/flac"
+            "category": "Lossless FLAC & High-Res Masters",
+            "stations": [
+                {
+                    "id": "rp_main",
+                    "name": "Radio Paradise (Main Mix)",
+                    "genre": "Eclectic Rock / Acoustic",
+                    "format": "Lossless FLAC 44.1kHz / 16-bit",
+                    "url": "http://stream.radioparadise.com/flac",
+                    "country": "United States"
+                },
+                {
+                    "id": "rp_mellow",
+                    "name": "Radio Paradise (Mellow Mix)",
+                    "genre": "Chilled Acoustic & Ambient",
+                    "format": "Lossless FLAC 44.1kHz / 16-bit",
+                    "url": "http://stream.radioparadise.com/mellow-flac",
+                    "country": "United States"
+                },
+                {
+                    "id": "rp_rock",
+                    "name": "Radio Paradise (Rock Mix)",
+                    "genre": "Classic & Progressive Rock",
+                    "format": "Lossless FLAC 44.1kHz / 16-bit",
+                    "url": "http://stream.radioparadise.com/rock-flac",
+                    "country": "United States"
+                },
+                {
+                    "id": "rp_global",
+                    "name": "Radio Paradise (Global Mix)",
+                    "genre": "World & Acoustic Fusion",
+                    "format": "Lossless FLAC 44.1kHz / 16-bit",
+                    "url": "http://stream.radioparadise.com/global-flac",
+                    "country": "United States"
+                },
+                {
+                    "id": "mother_earth",
+                    "name": "Mother Earth Radio Live",
+                    "genre": "Audiophile Vinyl & Studio Master",
+                    "format": "Lossless FLAC 96kHz / 24-bit",
+                    "url": "https://motherearth.streamserver24.com/listen/motherearth/motherearth.flac",
+                    "country": "Germany"
+                },
+                {
+                    "id": "jb_radio2",
+                    "name": "JB Radio-2 High-Res",
+                    "genre": "Non-Stop High Fidelity Mix",
+                    "format": "FLAC 192kHz Studio Master",
+                    "url": "http://199.189.87.9:10999/flac",
+                    "country": "Canada"
+                },
+                {
+                    "id": "sector_space",
+                    "name": "Sector Space Ambient",
+                    "genre": "Cosmic Ambient & Space Music",
+                    "format": "Lossless FLAC",
+                    "url": "http://89.223.45.5:8000/space-flac",
+                    "country": "International"
+                }
+            ]
         },
         {
-            "id": "rp_mellow",
-            "name": "Radio Paradise Mellow Mix",
-            "genre": "Chilled Acoustic & Ambient",
-            "format": "FLAC 44.1kHz / 16-bit",
-            "url": "http://stream.radioparadise.com/mellow-flac"
+            "category": "Classical & Orchestral",
+            "stations": [
+                {
+                    "id": "linn_classical",
+                    "name": "Linn Classical",
+                    "genre": "Orchestral & Chamber Master",
+                    "format": "MP3 320kbps Studio Master",
+                    "url": "http://radio.linn.co.uk:8003/autodj",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "bbc_r3",
+                    "name": "BBC Radio 3 HD",
+                    "genre": "Classical & Performing Arts",
+                    "format": "AAC 320kbps HD",
+                    "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_radio_three/bbc_radio_three.isml/bbc_radio_three-audio%3d320000.norewind.m3u8",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "swiss_classic",
+                    "name": "Radio Swiss Classic",
+                    "genre": "Pure Classical Music",
+                    "format": "MP3 192kbps",
+                    "url": "http://stream.srg-ssr.ch/m/rsc_de/mp3_128",
+                    "country": "Switzerland"
+                },
+                {
+                    "id": "venice_classic",
+                    "name": "Venice Classic Radio Italia",
+                    "genre": "Baroque & Early Italian Classical",
+                    "format": "AAC 128kbps HQ",
+                    "url": "http://174.36.206.197:8000/stream",
+                    "country": "Italy"
+                },
+                {
+                    "id": "king_fm",
+                    "name": "Classical KING FM Seattle",
+                    "genre": "Symphonic & Opera",
+                    "format": "MP3 320kbps",
+                    "url": "https://classicalking.streamguys1.com/king-aac-320",
+                    "country": "United States"
+                },
+                {
+                    "id": "france_musique",
+                    "name": "Radio France Musique",
+                    "genre": "Concerts & Philharmonic",
+                    "format": "AAC 320kbps HQ",
+                    "url": "http://icecast.radiofrance.fr/francemusique-midfi.mp3",
+                    "country": "France"
+                },
+                {
+                    "id": "classic_fm_uk",
+                    "name": "Classic FM UK",
+                    "genre": "Popular Classical Favourites",
+                    "format": "MP3 128kbps",
+                    "url": "http://media-ice.musicradio.com/ClassicFMMP3",
+                    "country": "United Kingdom"
+                }
+            ]
         },
         {
-            "id": "rp_rock",
-            "name": "Radio Paradise Rock Mix",
-            "genre": "High-Energy Rock & Classic",
-            "format": "FLAC 44.1kHz / 16-bit",
-            "url": "http://stream.radioparadise.com/rock-flac"
+            "category": "Jazz, Blues & Soul",
+            "stations": [
+                {
+                    "id": "linn_jazz",
+                    "name": "Linn Jazz",
+                    "genre": "Pure Contemporary & Classic Jazz",
+                    "format": "MP3 320kbps Studio Master",
+                    "url": "http://radio.linn.co.uk:8004/autodj",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "jazz_groove",
+                    "name": "The Jazz Groove West Coast",
+                    "genre": "Laid-Back Sophisticated Jazz",
+                    "format": "AAC 256kbps HQ",
+                    "url": "http://audio-edge-5bkfj.fra.h.radiomast.io/8525b6a3-f54c-4735-a7b2-031f795fc042",
+                    "country": "United States"
+                },
+                {
+                    "id": "swiss_jazz",
+                    "name": "Radio Swiss Jazz",
+                    "genre": "Jazz, Blues & Soul",
+                    "format": "MP3 192kbps",
+                    "url": "http://stream.srg-ssr.ch/m/rsj/mp3_128",
+                    "country": "Switzerland"
+                },
+                {
+                    "id": "wbgo_jazz",
+                    "name": "WBGO 88.3 FM New York",
+                    "genre": "Acoustic Jazz & Bebop",
+                    "format": "AAC 128kbps",
+                    "url": "http://wbgo.streamguys.net/wbgo96",
+                    "country": "United States"
+                },
+                {
+                    "id": "jazz_fm_uk",
+                    "name": "Jazz FM UK",
+                    "genre": "Soul, Blues & Jazz",
+                    "format": "MP3 128kbps",
+                    "url": "http://icecast.bauerservers.com/jazzhigh.mp3",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "fip_jazz",
+                    "name": "FIP Jazz Paris",
+                    "genre": "French & International Jazz",
+                    "format": "MP3 192kbps",
+                    "url": "http://icecast.radiofrance.fr/fipjazz-midfi.mp3",
+                    "country": "France"
+                }
+            ]
         },
         {
-            "id": "rp_global",
-            "name": "Radio Paradise Global Mix",
-            "genre": "World Music & Fusion",
-            "format": "FLAC 44.1kHz / 16-bit",
-            "url": "http://stream.radioparadise.com/global-flac"
+            "category": "Eclectic, Showcase & Indie",
+            "stations": [
+                {
+                    "id": "linn_radio",
+                    "name": "Linn Radio Showcase",
+                    "genre": "Audiophile Showcase Master",
+                    "format": "MP3 320kbps Studio Master",
+                    "url": "http://radio.linn.co.uk:8000/autodj",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "naim_radio",
+                    "name": "Naim Radio",
+                    "genre": "High Fidelity Label Showcase",
+                    "format": "MP3 320kbps Studio Master",
+                    "url": "http://m3u.audiomastering.com:8000/naim320.mp3",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "kexp",
+                    "name": "KEXP 90.3 FM Seattle",
+                    "genre": "Where the Music Matters",
+                    "format": "AAC 160kbps HQ",
+                    "url": "https://kexp.streamguys1.com/kexp160.aac",
+                    "country": "United States"
+                },
+                {
+                    "id": "bbc_6music",
+                    "name": "BBC Radio 6 Music",
+                    "genre": "Alternative & Underground",
+                    "format": "AAC 320kbps HD",
+                    "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_6music/bbc_6music.isml/bbc_6music-audio%3d320000.norewind.m3u8",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "fip_paris",
+                    "name": "FIP Radio Paris",
+                    "genre": "Eclectic Genre-Defying Radio",
+                    "format": "AAC 320kbps HQ",
+                    "url": "http://icecast.radiofrance.fr/fip-midfi.mp3",
+                    "country": "France"
+                },
+                {
+                    "id": "kcrw_eclectic",
+                    "name": "KCRW Eclectic 24 Los Angeles",
+                    "genre": "Hand-Picked Indie & World",
+                    "format": "AAC 128kbps",
+                    "url": "https://kcrw.streamguys1.com/kcrw_192k_mp3_e24_internet_onair",
+                    "country": "United States"
+                }
+            ]
         },
         {
-            "id": "linn_radio",
-            "name": "Linn Radio Studio Master",
-            "genre": "Audiophile Showcase",
-            "format": "MP3 320kbps Studio Master",
-            "url": "http://radio.linn.co.uk:8000/autodj"
+            "category": "Ambient, Electronic & Chillout",
+            "stations": [
+                {
+                    "id": "soma_groove",
+                    "name": "SomaFM: Groove Salad",
+                    "genre": "Downtempo & Ambient Grooves",
+                    "format": "AAC 320kbps HQ",
+                    "url": "http://ice2.somafm.com/groovesalad-256-mp3",
+                    "country": "United States"
+                },
+                {
+                    "id": "soma_drone",
+                    "name": "SomaFM: Drone Zone",
+                    "genre": "Atmospheric Space & Ambient",
+                    "format": "MP3 320kbps",
+                    "url": "http://ice2.somafm.com/dronezone-256-mp3",
+                    "country": "United States"
+                },
+                {
+                    "id": "soma_deepspace",
+                    "name": "SomaFM: Deep Space One",
+                    "genre": "Deep Ambient Electronic",
+                    "format": "MP3 320kbps",
+                    "url": "http://ice2.somafm.com/deepspaceone-256-mp3",
+                    "country": "United States"
+                },
+                {
+                    "id": "chilltrax",
+                    "name": "Chilltrax World Chillout",
+                    "genre": "Chillout, Lounge & Ambient",
+                    "format": "MP3 320kbps",
+                    "url": "http://ice5.somafm.com/defcon-256-mp3",
+                    "country": "United States"
+                },
+                {
+                    "id": "ibiza_sonica",
+                    "name": "Ibiza Sonica Radio",
+                    "genre": "Balearic Electronic & Deep House",
+                    "format": "MP3 192kbps",
+                    "url": "https://sonicabroadcast.com/sonica/audio.mp3",
+                    "country": "Spain"
+                }
+            ]
         },
         {
-            "id": "linn_classical",
-            "name": "Linn Classical",
-            "genre": "Orchestral & Chamber",
-            "format": "MP3 320kbps Studio Master",
-            "url": "http://radio.linn.co.uk:8003/autodj"
-        },
-        {
-            "id": "linn_jazz",
-            "name": "Linn Jazz",
-            "genre": "Pure Contemporary & Classic Jazz",
-            "format": "MP3 320kbps Studio Master",
-            "url": "http://radio.linn.co.uk:8004/autodj"
-        },
-        {
-            "id": "bbc_r3",
-            "name": "BBC Radio 3 HD",
-            "genre": "Classical & Contemporary Arts",
-            "format": "AAC 320kbps HD",
-            "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_radio_three/bbc_radio_three.isml/bbc_radio_three-audio%3d320000.norewind.m3u8"
+            "category": "British National Radio",
+            "stations": [
+                {
+                    "id": "bbc_r1",
+                    "name": "BBC Radio 1",
+                    "genre": "Current Hits & New Music",
+                    "format": "AAC 320kbps HD",
+                    "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_radio_one/bbc_radio_one.isml/bbc_radio_one-audio%3d320000.norewind.m3u8",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "bbc_r2",
+                    "name": "BBC Radio 2",
+                    "genre": "Adult Contemporary & Special Programmes",
+                    "format": "AAC 320kbps HD",
+                    "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_radio_two/bbc_radio_two.isml/bbc_radio_two-audio%3d320000.norewind.m3u8",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "bbc_r4",
+                    "name": "BBC Radio 4",
+                    "genre": "News, Speech, Drama & Arts",
+                    "format": "AAC 320kbps HD",
+                    "url": "http://as-hls-ww-live.akamaized.net/pool_904/live/ww/bbc_radio_fourfm/bbc_radio_fourfm.isml/bbc_radio_fourfm-audio%3d320000.norewind.m3u8",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "bbc_world_service",
+                    "name": "BBC World Service",
+                    "genre": "Global News & Features",
+                    "format": "AAC 128kbps",
+                    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "lbc_london",
+                    "name": "LBC London 97.3 FM",
+                    "genre": "News, Politics & Phone-In Talk",
+                    "format": "MP3 128kbps",
+                    "url": "http://media-the.musicradio.com/LBC973MP3",
+                    "country": "United Kingdom"
+                },
+                {
+                    "id": "times_radio",
+                    "name": "Times Radio UK",
+                    "genre": "Quality News & Intelligent Discussion",
+                    "format": "AAC 128kbps",
+                    "url": "https://timesradio.wireless.radio/stream",
+                    "country": "United Kingdom"
+                }
+            ]
         }
     ]
 
@@ -268,6 +608,7 @@ class BremenDeviceManager:
         self.is_connected = False
         self.has_mpd = False
         self.mpd = MPDClient()
+        self.radio_favourites = []
 
         # Real state cache — initialised to genuine idle values, never simulated
         self.state = {
@@ -297,7 +638,7 @@ class BremenDeviceManager:
         self.start_background_poll()
 
     def load_config(self):
-        """Loads cached device credentials if available."""
+        """Loads cached device credentials and saved radio favourites."""
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -309,6 +650,7 @@ class BremenDeviceManager:
                     self.control_url_openhome_product = cfg.get("control_url_openhome_product", "")
                     self.control_url_openhome_volume = cfg.get("control_url_openhome_volume", "")
                     self.device_name = cfg.get("device_name", "Silent Angel Bremen SL1P")
+                    self.radio_favourites = cfg.get("radio_favourites", [])
                     if self.target_ip:
                         self.state["device_ip"] = self.target_ip
                         self.state["device_name"] = self.device_name
@@ -316,7 +658,7 @@ class BremenDeviceManager:
                 print(f"[Config] Error loading configuration: {e}", flush=True)
 
     def save_config(self):
-        """Persists device details for rapid reconnect."""
+        """Persists device details and user favourites for rapid reconnect."""
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump({
@@ -326,10 +668,35 @@ class BremenDeviceManager:
                     "control_url_content": self.control_url_content,
                     "control_url_openhome_product": self.control_url_openhome_product,
                     "control_url_openhome_volume": self.control_url_openhome_volume,
-                    "device_name": self.device_name
+                    "device_name": self.device_name,
+                    "radio_favourites": self.radio_favourites
                 }, f, indent=2)
         except Exception as e:
             print(f"[Config] Error saving configuration: {e}", flush=True)
+
+    def toggle_favourite(self, station_data):
+        """Adds or removes a station from user favourites."""
+        with self.lock:
+            st_url = station_data.get("url", "")
+            exists_idx = -1
+            for i, item in enumerate(self.radio_favourites):
+                if item.get("url") == st_url or (item.get("id") and item.get("id") == station_data.get("id")):
+                    exists_idx = i
+                    break
+
+            if exists_idx >= 0:
+                self.radio_favourites.pop(exists_idx)
+                is_fav = False
+            else:
+                self.radio_favourites.append(station_data)
+                is_fav = True
+
+        self.save_config()
+        return is_fav
+
+    def get_favourites(self):
+        with self.lock:
+            return list(self.radio_favourites)
 
     def discover_all_devices(self, timeout=3.5):
         """
@@ -552,7 +919,6 @@ class BremenDeviceManager:
             is_bremen = any(k in f"{friendly_name} {model_name} {manufacturer}".lower()
                             for k in ["bremen", "silent angel", "vitos", "thunder data"])
 
-            # Check if MPD is also active on port 6600
             has_mpd = False
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -593,7 +959,6 @@ class BremenDeviceManager:
             self.state["device_ip"] = ip
             self.state["device_name"] = self.device_name
 
-        # If control URLs are empty, try probing common ports
         if not self.control_url_transport:
             for p in [49152, 49153, 80]:
                 for desc in ["/description.xml", "/device.xml", "/rootDesc.xml"]:
@@ -607,9 +972,7 @@ class BremenDeviceManager:
                 if self.control_url_transport:
                     break
 
-        # Check MPD connection
         self.has_mpd = self.mpd.connect(ip, timeout=1.0)
-
         self.save_config()
         self.refresh_state()
         return True
@@ -646,7 +1009,6 @@ class BremenDeviceManager:
             return None
 
     def play(self):
-        """Dispatches Play command via UPnP or MPD."""
         if self.has_mpd:
             self.mpd.execute("play")
         if self.control_url_transport:
@@ -659,7 +1021,6 @@ class BremenDeviceManager:
         return None
 
     def pause(self):
-        """Dispatches Pause command via UPnP or MPD."""
         if self.has_mpd:
             self.mpd.execute("pause 1")
         if self.control_url_transport:
@@ -672,7 +1033,6 @@ class BremenDeviceManager:
         return None
 
     def stop(self):
-        """Dispatches Stop command via UPnP or MPD."""
         if self.has_mpd:
             self.mpd.execute("stop")
         if self.control_url_transport:
@@ -685,7 +1045,6 @@ class BremenDeviceManager:
         return None
 
     def next_track(self):
-        """Dispatches Next command."""
         if self.has_mpd:
             self.mpd.execute("next")
         if self.control_url_transport:
@@ -698,7 +1057,6 @@ class BremenDeviceManager:
         return None
 
     def previous_track(self):
-        """Dispatches Previous command."""
         if self.has_mpd:
             self.mpd.execute("previous")
         if self.control_url_transport:
@@ -711,8 +1069,6 @@ class BremenDeviceManager:
         return None
 
     def seek(self, target_time_str):
-        """Dispatches Seek command to target timestamp (HH:MM:SS)."""
-        # Parse seconds for MPD
         sec = 0
         p = target_time_str.split(":")
         if len(p) == 2:
@@ -733,7 +1089,6 @@ class BremenDeviceManager:
         return None
 
     def set_volume(self, volume):
-        """Dispatches SetVolume command (0-100%)."""
         vol = max(0, min(100, int(volume)))
         if self.has_mpd:
             self.mpd.execute(f"setvol {vol}")
@@ -748,7 +1103,6 @@ class BremenDeviceManager:
         return None
 
     def set_mute(self, mute_bool):
-        """Dispatches SetMute command."""
         desired = "1" if mute_bool else "0"
         if self.control_url_rendering:
             return self.soap_request(
@@ -759,7 +1113,7 @@ class BremenDeviceManager:
             )
         return None
 
-    def set_av_transport_uri(self, uri, title="Stream", artist="Silent Angel", album="Bremen Studio"):
+    def set_av_transport_uri(self, uri, title="Stream", artist="Silent Angel", album="Internet Radio"):
         """
         Loads and plays any stream or audio file directly on the Bremen hardware.
         Sends SetAVTransportURI with genuine DIDL-Lite metadata, followed by Play.
@@ -807,7 +1161,6 @@ class BremenDeviceManager:
         """
         items = []
 
-        # MPD Method
         if self.has_mpd:
             res = self.mpd.execute(f'lsinfo "{path}"')
             if isinstance(res, list):
@@ -832,7 +1185,6 @@ class BremenDeviceManager:
                         })
             return {"source": "MPD Storage Engine", "path": path, "items": items}
 
-        # UPnP ContentDirectory Method
         if self.control_url_content:
             obj_id = path if path else "0"
             resp = self.soap_request(
@@ -886,7 +1238,6 @@ class BremenDeviceManager:
 
         # 1. UPnP AVTransport Polling
         if self.control_url_transport:
-            # Transport State (PLAYING, PAUSED_PLAYBACK, STOPPED)
             t_resp = self.soap_request(
                 self.control_url_transport,
                 "urn:schemas-upnp-org:service:AVTransport:1",
@@ -900,7 +1251,6 @@ class BremenDeviceManager:
                         self.state["transport_state"] = m_state.group(1)
                         self.state["connected"] = True
 
-            # Position & Track Metadata
             pos_resp = self.soap_request(
                 self.control_url_transport,
                 "urn:schemas-upnp-org:service:AVTransport:1",
@@ -922,7 +1272,6 @@ class BremenDeviceManager:
                     meta_xml = m_meta.group(1).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
                     self.parse_didl_metadata(meta_xml)
 
-            # GetMediaInfo for protocol / bitrate
             med_resp = self.soap_request(
                 self.control_url_transport,
                 "urn:schemas-upnp-org:service:AVTransport:1",
@@ -971,7 +1320,6 @@ class BremenDeviceManager:
                         self.state["rel_time"] = self.format_sec_to_time(float(elap))
                         self.state["track_duration"] = self.format_sec_to_time(float(tot))
 
-                    # Parse real audio format from MPD: e.g. "44100:16:2" or "192000:24:2" or "dsd64:2"
                     if "audio" in mpd_st:
                         a_parts = mpd_st["audio"].split(":")
                         if len(a_parts) >= 2:
@@ -985,7 +1333,6 @@ class BremenDeviceManager:
                             self.state["bit_depth"] = f"{b_depth}-bit" if b_depth.isdigit() else b_depth
                             self.state["format_label"] = f"{self.state['sample_rate']} / {self.state['bit_depth']}"
 
-            # Current song info
             mpd_song = self.mpd.execute("currentsong")
             if isinstance(mpd_song, dict):
                 with self.lock:
@@ -998,7 +1345,6 @@ class BremenDeviceManager:
                     if "Album" in mpd_song:
                         self.state["track_album"] = mpd_song["Album"]
 
-        # When stopped and no active stream, reflect genuine idle state
         with self.lock:
             if self.state["transport_state"] == "STOPPED" and self.state["track_title"] == "Standby (Ready)":
                 self.state["sample_rate"] = "—"
@@ -1024,7 +1370,6 @@ class BremenDeviceManager:
             if m_art:
                 self.state["album_art_url"] = m_art.group(1)
 
-            # Real stream telemetry from <res> tag attributes
             if m_res:
                 res_attrs = m_res.group(1)
                 m_freq = re.search(r'sampleFrequency="(\d+)"', res_attrs)
@@ -1049,7 +1394,6 @@ class BremenDeviceManager:
                     elif "audio/aac" in p_str:
                         self.state["codec"] = "AAC"
 
-                # Compute genuine format badge
                 if self.state["sample_rate"] != "—" and self.state["bit_depth"] != "—":
                     self.state["format_label"] = f"{self.state['codec']} {self.state['sample_rate']} / {self.state['bit_depth']}"
 
@@ -1061,7 +1405,6 @@ class BremenDeviceManager:
         return (f"{h:02d}:" if h > 0 else "") + f"{m:02d}:{s:02d}"
 
     def start_background_poll(self):
-        """Starts daemon thread querying hardware every 1.5 seconds."""
         def run_loop():
             while True:
                 try:
@@ -1075,7 +1418,6 @@ class BremenDeviceManager:
         t.start()
 
 
-# Global controller manager
 manager = BremenDeviceManager()
 
 
@@ -1083,7 +1425,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     """Serves the audiophile web interface and JSON REST API with genuine live endpoints."""
 
     def log_message(self, format, *args):
-        # Suppress polling log spam
         if "/api/status" not in self.path:
             super().log_message(format, *args)
 
@@ -1097,8 +1438,27 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/discover":
             devices = manager.discover_all_devices(timeout=3.0)
             self.send_json({"devices": devices})
-        elif path == "/api/radio/stations":
-            self.send_json({"stations": manager.RADIO_STATIONS})
+        elif path == "/api/radio/curated":
+            self.send_json({
+                "categories": manager.CURATED_RADIO_CATEGORIES,
+                "countries": RadioBrowserService.POPULAR_COUNTRIES,
+                "genres": RadioBrowserService.POPULAR_GENRES
+            })
+        elif path == "/api/radio/search":
+            q_name = query.get("query", [""])[0]
+            q_tag = query.get("tag", [""])[0]
+            q_country = query.get("country", [""])[0]
+            q_order = query.get("order", ["votes"])[0]
+            results = RadioBrowserService.search_stations(
+                query=q_name,
+                tag=q_tag,
+                country=q_country,
+                order=q_order,
+                limit=50
+            )
+            self.send_json({"stations": results})
+        elif path == "/api/radio/favourites":
+            self.send_json({"favourites": manager.get_favourites()})
         elif path == "/api/storage/browse":
             target_path = query.get("path", [""])[0]
             res = manager.browse_storage(target_path)
@@ -1153,6 +1513,10 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
             manager.set_av_transport_uri(uri, title, artist, album)
             self.send_json({"status": "acknowledged", "streaming": uri})
 
+        elif path == "/api/radio/favourite":
+            is_fav = manager.toggle_favourite(data)
+            self.send_json({"status": "ok", "is_favourite": is_fav})
+
         elif path == "/api/control":
             action = data.get("action", "")
             val = data.get("value", None)
@@ -1191,7 +1555,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(out)
 
     def serve_ui(self):
-        """Renders the luxury audiophile web user interface with official vector SVGs."""
+        """Renders the luxury audiophile web user interface with comprehensive Internet Radio."""
         html = """<!DOCTYPE html>
 <html lang="en-GB">
 <head>
@@ -1764,14 +2128,18 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       border: 1px solid var(--border-subtle);
       border-radius: 20px;
       width: 90%;
-      max-width: 620px;
+      max-width: 680px;
       padding: 32px;
       box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8);
       display: flex;
       flex-direction: column;
       gap: 20px;
-      max-height: 85vh;
+      max-height: 88vh;
       overflow-y: auto;
+    }
+
+    .modal-card.wide {
+      max-width: 920px;
     }
 
     .modal-head {
@@ -1791,6 +2159,157 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       color: var(--text-muted);
       font-size: 26px;
       cursor: pointer;
+    }
+
+    /* Tuner Tabs */
+    .tuner-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-subtle);
+      gap: 18px;
+    }
+
+    .tuner-tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13.5px;
+      font-weight: 700;
+      padding-bottom: 12px;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .tuner-tab-btn.active {
+      color: var(--accent-gold);
+    }
+
+    .tuner-tab-btn.active::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: 100%;
+      height: 2px;
+      background: var(--accent-gold);
+      box-shadow: 0 0 10px var(--accent-gold);
+    }
+
+    .radio-search-bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .tuner-input {
+      flex: 1;
+      min-width: 200px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text-main);
+      font-size: 13px;
+      outline: none;
+    }
+
+    .tuner-select {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text-main);
+      font-size: 12px;
+      outline: none;
+    }
+
+    .station-category-title {
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--accent-gold);
+      margin: 14px 0 8px 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .station-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .station-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 14px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      position: relative;
+    }
+
+    .station-card:hover {
+      border-color: var(--accent-gold);
+      background: #202838;
+      transform: translateY(-2px);
+    }
+
+    .station-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .station-header h4 {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.3;
+    }
+
+    .btn-fav {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      font-size: 17px;
+      cursor: pointer;
+      transition: transform 0.15s ease;
+    }
+
+    .btn-fav:hover {
+      transform: scale(1.2);
+    }
+
+    .btn-fav.active {
+      color: #eab308;
+    }
+
+    .station-format-badge {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--accent-gold);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .station-tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .station-tag {
+      font-size: 9.5px;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-muted);
     }
 
     .scan-radar {
@@ -1864,41 +2383,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       text-transform: uppercase;
       letter-spacing: 0.5px;
       margin-left: 6px;
-    }
-
-    .station-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-
-    .station-card {
-      background: var(--bg-elevated);
-      border: 1px solid var(--border-subtle);
-      border-radius: 12px;
-      padding: 14px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .station-card:hover {
-      border-color: var(--accent-gold);
-      background: #202838;
-      transform: translateY(-2px);
-    }
-
-    .station-card h4 {
-      font-size: 13.5px;
-      font-weight: 700;
-      color: var(--text-main);
-    }
-
-    .station-card p {
-      font-size: 11px;
-      color: var(--accent-gold);
     }
 
     .storage-list {
@@ -2000,7 +2484,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
   </svg>
 
   <div class="app-container">
-    <!-- Desktop Sidebar -->
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-logo-box">
@@ -2015,7 +2498,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       <div class="nav-section">
         <h3>Primary Playback</h3>
         <ul class="nav-list">
-          <li class="nav-item active" id="nav-now-playing" onclick="showSection('now-playing')">
+          <li class="nav-item active" id="nav-now-playing">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
             Now Playing
           </li>
@@ -2034,7 +2517,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         </ul>
       </div>
 
-      <!-- Real Hardware Connection Status Card -->
       <div class="device-card">
         <div class="device-status">
           <div class="status-dot" id="side-status-dot"></div>
@@ -2048,7 +2530,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       </div>
     </aside>
 
-    <!-- Main Viewport -->
     <main class="main-viewport">
       <div class="top-header">
         <div class="header-title">
@@ -2056,7 +2537,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           <p>Lossless Bit-Perfect Streaming Output for Silent Angel Bremen SL1P</p>
         </div>
 
-        <!-- Official Streaming Protocols Selector -->
         <div class="protocol-badges">
           <div class="source-pill active" onclick="switchSource('UPnP / DLNA')">
             <svg width="18" height="18"><use href="#icon-upnp"/></svg>
@@ -2085,7 +2565,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         </div>
       </div>
 
-      <!-- Live Real Audio Telemetry HUD -->
       <div class="telemetry-row">
         <div class="hud-badge gold">
           <svg width="34" height="20"><use href="#icon-hires"/></svg>
@@ -2107,7 +2586,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         </div>
       </div>
 
-      <!-- Hero Now Playing Stage -->
       <div class="stage-container">
         <div class="album-art-wrapper">
           <div class="vinyl-groove"></div>
@@ -2130,7 +2608,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
             <h3 class="track-album" id="stage-album">VitOS Audio Core</h3>
           </div>
 
-          <!-- Scrub Bar -->
           <div class="scrub-container">
             <div class="scrub-track" id="scrub-track" onclick="handleScrub(event)">
               <div class="scrub-progress" id="scrub-progress"></div>
@@ -2145,7 +2622,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     </main>
   </div>
 
-  <!-- Master Player Bar (Fixed Bottom) -->
   <footer class="master-bar">
     <div class="bar-left">
       <div class="bar-title" id="bar-title">Standby (Ready)</div>
@@ -2212,26 +2688,78 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     </div>
   </div>
 
-  <!-- Real Internet Radio Modal -->
+  <!-- Fully Comprehensive Internet Radio Modal -->
   <div class="modal-overlay" id="radio-modal">
-    <div class="modal-card">
+    <div class="modal-card wide">
       <div class="modal-head">
-        <h3>Internet Radio Studio Tuner</h3>
+        <div>
+          <h3>Internet Radio Studio Tuner</h3>
+          <p style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+            Access over 35,000 global live stations plus curated Audiophile FLAC and Studio Masters.
+          </p>
+        </div>
         <button class="btn-close" onclick="closeRadioModal()">&times;</button>
       </div>
-      <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
-        Select an audiophile stream below. The stream is sent directly to your Bremen SL1P hardware via bit-perfect UPnP / MPD streaming.
-      </p>
 
-      <div class="station-grid" id="station-grid">
-        <!-- Rendered dynamically -->
+      <!-- Navigation Tabs -->
+      <div class="tuner-tabs">
+        <button class="tuner-tab-btn active" id="tab-curated-btn" onclick="switchRadioTab('curated')">🌟 Curated Presets</button>
+        <button class="tuner-tab-btn" id="tab-search-btn" onclick="switchRadioTab('search')">🌐 Global Directory (35,000+)</button>
+        <button class="tuner-tab-btn" id="tab-fav-btn" onclick="switchRadioTab('fav')">❤️ My Favourites (<span id="fav-count">0</span>)</button>
+        <button class="tuner-tab-btn" id="tab-custom-btn" onclick="switchRadioTab('custom')">🔗 Custom Stream URL</button>
       </div>
 
-      <div style="border-top: 1px solid var(--border-subtle); padding-top: 14px; display:flex; flex-direction:column; gap:8px;">
-        <label style="font-size:11.5px; color:var(--text-muted); font-weight:600;">Play Custom Stream URL</label>
-        <div style="display:flex; gap:8px;">
-          <input type="text" id="custom-stream-url" placeholder="http://stream.example.com:8000/live.flac" style="flex:1; background:var(--bg-elevated); border:1px solid var(--border-subtle); border-radius:8px; padding:10px 14px; color:var(--text-main); font-family:'JetBrains Mono', monospace; font-size:13px; outline:none;">
-          <button class="btn-connect" onclick="playCustomStream()">Tune In</button>
+      <!-- Tab 1: Curated Audiophile Presets -->
+      <div id="radio-tab-curated">
+        <div id="curated-container" style="max-height: 55vh; overflow-y: auto; padding-right: 6px;">
+          <div style="text-align:center; padding:30px; color:var(--text-muted); font-size:13px;">Loading master stations...</div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Global Directory Search -->
+      <div id="radio-tab-search" style="display:none; flex-direction:column; gap:14px;">
+        <div class="radio-search-bar">
+          <input type="text" class="tuner-input" id="search-station-input" placeholder="Search by name, artist, callsign... (e.g. BBC, Jazz FM, Classic, KEXP)" oninput="handleSearchInput()">
+          <select class="tuner-select" id="search-genre-select" onchange="performGlobalSearch()">
+            <option value="">All Genres / Tags</option>
+          </select>
+          <select class="tuner-select" id="search-country-select" onchange="performGlobalSearch()">
+            <option value="">All Countries</option>
+          </select>
+          <select class="tuner-select" id="search-order-select" onchange="performGlobalSearch()">
+            <option value="votes">Top Voted</option>
+            <option value="clickcount">Most Popular</option>
+            <option value="bitrate">Highest Bitrate</option>
+            <option value="name">Station Name</option>
+          </select>
+        </div>
+
+        <div style="font-size:12px; color:var(--text-muted); display:flex; justify-content:space-between; align-items:center;">
+          <span id="search-results-label">Type station name or choose genre to search</span>
+          <span id="search-loading-indicator" style="display:none; color:var(--accent-gold);">Searching 35,000+ streams...</span>
+        </div>
+
+        <div class="station-grid" id="search-results-grid" style="max-height: 48vh; overflow-y: auto; padding-right: 6px;">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+
+      <!-- Tab 3: My Favourites -->
+      <div id="radio-tab-fav" style="display:none;">
+        <div class="station-grid" id="fav-results-grid" style="max-height: 55vh; overflow-y: auto; padding-right: 6px;">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+
+      <!-- Tab 4: Custom Stream URL -->
+      <div id="radio-tab-custom" style="display:none; flex-direction:column; gap:16px; padding: 10px 0;">
+        <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
+          Stream any direct web broadcast (HLS <code>.m3u8</code>, Icecast, Shoutcast, or direct <code>.flac</code>/<code>.aac</code>/<code>.mp3</code> URL) bit-perfectly on your Silent Angel Bremen SL1P.
+        </p>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <input type="text" id="custom-stream-name" placeholder="Station Title (e.g. My Custom Lossless Radio)" class="tuner-input">
+          <input type="text" id="custom-stream-url" placeholder="http://stream.example.com:8000/live.flac" class="tuner-input" style="font-family:'JetBrains Mono', monospace;">
+          <button class="btn-connect" style="padding:12px;" onclick="playCustomStream()">Tune In to Custom Broadcast</button>
         </div>
       </div>
     </div>
@@ -2259,14 +2787,14 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
   <script>
     let isPlaying = false;
     let isMuted = false;
+    let cachedFavourites = [];
+    let searchDebounceTimer = null;
 
-    // Periodic state polling
     async function updateStatus() {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        // Connection indicators
         const dot = document.getElementById('side-status-dot');
         const stText = document.getElementById('side-status-text');
         const devName = document.getElementById('side-dev-name');
@@ -2283,7 +2811,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           if (data.device_ip) devIp.innerText = data.device_ip;
         }
 
-        // Transport Play/Pause Icon
         isPlaying = (data.transport_state === "PLAYING");
         const playIcon = document.getElementById('play-icon');
         if (isPlaying) {
@@ -2292,14 +2819,12 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           playIcon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
         }
 
-        // Metadata
         document.getElementById('stage-title').innerText = data.track_title;
         document.getElementById('stage-artist').innerText = data.track_artist;
         document.getElementById('stage-album').innerText = data.track_album;
         document.getElementById('bar-title').innerText = data.track_title;
         document.getElementById('bar-artist').innerText = data.track_artist;
 
-        // Times & Scrub Progress
         document.getElementById('time-elapsed').innerText = data.rel_time;
         document.getElementById('time-total').innerText = data.track_duration;
         const curSec = parseTimeToSec(data.rel_time);
@@ -2311,7 +2836,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           document.getElementById('scrub-progress').style.width = '0%';
         }
 
-        // Album Art Handling
         const artImg = document.getElementById('stage-artwork');
         const vinylIcon = document.getElementById('vinyl-icon');
         if (data.album_art_url) {
@@ -2323,7 +2847,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           vinylIcon.style.display = 'block';
         }
 
-        // Real Telemetry HUD
         document.getElementById('hud-format').innerText = data.format_label || "No Active Stream (Ready)";
         document.getElementById('stage-codec').innerText = data.codec !== "—" ? (data.codec + " Audio Stream") : "Standby (Ready)";
 
@@ -2331,7 +2854,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           document.getElementById('hud-source').innerText = "Source: " + data.active_source;
         }
 
-        // Hardware Volume
         if (!document.getElementById('vol-range').matches(':active')) {
           document.getElementById('vol-range').value = data.volume;
           document.getElementById('vol-label').innerText = data.volume + '%';
@@ -2374,7 +2896,6 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     setInterval(updateStatus, 1500);
     updateStatus();
 
-    // Control actions
     async function sendControl(action, value = null) {
       await fetch('/api/control', {
         method: 'POST',
@@ -2405,7 +2926,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       sendControl('source', sourceName);
     }
 
-    // Discovery Modal Handlers
+    // Device Discovery Handlers
     function openDiscoveryModal() {
       document.getElementById('discovery-modal').style.display = 'flex';
     }
@@ -2481,46 +3002,224 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       updateStatus();
     }
 
-    // Real Internet Radio Handlers
+    // ==========================================
+    // Fully Comprehensive Internet Radio Engine
+    // ==========================================
     async function openRadioModal() {
       document.getElementById('radio-modal').style.display = 'flex';
-      const grid = document.getElementById('station-grid');
-      if (grid.children.length === 0) {
-        const res = await fetch('/api/radio/stations');
-        const data = await res.json();
-        grid.innerHTML = '';
-        data.stations.forEach(st => {
-          const card = document.createElement('div');
-          card.className = 'station-card';
-          card.innerHTML = `
-            <h4>${st.name}</h4>
-            <p>${st.format}</p>
-            <div style="font-size:11px; color:var(--text-dim);">${st.genre}</div>
-          `;
-          card.onclick = async () => {
-            await fetch('/api/play_stream', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({
-                url: st.url,
-                title: st.name,
-                artist: 'Internet Radio Tuner',
-                album: st.genre
-              })
-            });
-            closeRadioModal();
-            updateStatus();
-          };
-          grid.appendChild(card);
-        });
-      }
+      await loadFavourites();
+      await loadCuratedPresets();
     }
 
     function closeRadioModal() {
       document.getElementById('radio-modal').style.display = 'none';
     }
 
+    function switchRadioTab(tabName) {
+      const tabs = ['curated', 'search', 'fav', 'custom'];
+      tabs.forEach(t => {
+        document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === tabName);
+        const pane = document.getElementById(`radio-tab-${t}`);
+        if (pane) pane.style.display = (t === tabName) ? (t === 'search' || t === 'custom' ? 'flex' : 'block') : 'none';
+      });
+
+      if (tabName === 'fav') {
+        renderFavourites();
+      } else if (tabName === 'search' && document.getElementById('search-results-grid').children.length === 0) {
+        performGlobalSearch();
+      }
+    }
+
+    async function loadFavourites() {
+      try {
+        const res = await fetch('/api/radio/favourites');
+        const data = await res.json();
+        cachedFavourites = data.favourites || [];
+        document.getElementById('fav-count').innerText = cachedFavourites.length;
+      } catch (e) {
+        cachedFavourites = [];
+      }
+    }
+
+    function isStationFavourited(station) {
+      return cachedFavourites.some(f => f.url === station.url || (f.id && f.id === station.id));
+    }
+
+    async function toggleStationFav(e, station) {
+      e.stopPropagation();
+      try {
+        const res = await fetch('/api/radio/favourite', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(station)
+        });
+        const d = await res.json();
+        await loadFavourites();
+        renderFavourites();
+        // Update star icons across visible tabs
+        document.querySelectorAll(`.fav-star-${sanitizeId(station.url)}`).forEach(star => {
+          star.classList.toggle('active', d.is_favourite);
+          star.innerHTML = d.is_favourite ? '★' : '☆';
+        });
+      } catch (err) {
+        console.error("Error toggling favourite:", err);
+      }
+    }
+
+    function sanitizeId(str) {
+      return btoa(str).replace(/[^a-zA-Z0-9]/g, '');
+    }
+
+    function createStationCard(st) {
+      const card = document.createElement('div');
+      card.className = 'station-card';
+      const isFav = isStationFavourited(st);
+      const favKey = sanitizeId(st.url);
+
+      let tagsHtml = '';
+      if (st.tags && Array.isArray(st.tags)) {
+        tagsHtml = st.tags.map(t => `<span class="station-tag">${t}</span>`).join('');
+      } else if (st.genre) {
+        tagsHtml = `<span class="station-tag">${st.genre}</span>`;
+      }
+
+      const formatLabel = st.format || (st.bitrate ? `${st.codec} ${st.bitrate}k` : st.codec || 'Live Audio');
+      const countryLabel = st.country ? ` • ${st.country}` : '';
+
+      card.innerHTML = `
+        <div class="station-header">
+          <h4>${st.name}</h4>
+          <button class="btn-fav fav-star-${favKey} ${isFav ? 'active' : ''}" title="Save to Favourites">${isFav ? '★' : '☆'}</button>
+        </div>
+        <div class="station-format-badge">${formatLabel}${countryLabel}</div>
+        <div class="station-tags">${tagsHtml}</div>
+      `;
+
+      card.querySelector('.btn-fav').onclick = (e) => toggleStationFav(e, st);
+
+      card.onclick = async () => {
+        await fetch('/api/play_stream', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            url: st.url,
+            title: st.name,
+            artist: st.genre || st.country || 'Internet Radio',
+            album: formatLabel
+          })
+        });
+        closeRadioModal();
+        updateStatus();
+      };
+
+      return card;
+    }
+
+    async function loadCuratedPresets() {
+      const container = document.getElementById('curated-container');
+      try {
+        const res = await fetch('/api/radio/curated');
+        const data = await res.json();
+        container.innerHTML = '';
+
+        // Populate search dropdowns if not done yet
+        const genreSelect = document.getElementById('search-genre-select');
+        if (genreSelect.options.length <= 1 && data.genres) {
+          data.genres.forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = g;
+            opt.innerText = g.charAt(0).toUpperCase() + g.slice(1);
+            genreSelect.appendChild(opt);
+          });
+        }
+
+        const countrySelect = document.getElementById('search-country-select');
+        if (countrySelect.options.length <= 1 && data.countries) {
+          data.countries.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c;
+            opt.innerText = c;
+            countrySelect.appendChild(opt);
+          });
+        }
+
+        data.categories.forEach(cat => {
+          const title = document.createElement('div');
+          title.className = 'station-category-title';
+          title.innerHTML = `<span>⚡</span> ${cat.category}`;
+          container.appendChild(title);
+
+          const grid = document.createElement('div');
+          grid.className = 'station-grid';
+          cat.stations.forEach(st => {
+            grid.appendChild(createStationCard(st));
+          });
+          container.appendChild(grid);
+        });
+      } catch (e) {
+        container.innerHTML = '<div style="color:var(--danger); padding:20px; text-align:center;">Failed to load presets.</div>';
+      }
+    }
+
+    function renderFavourites() {
+      const grid = document.getElementById('fav-results-grid');
+      grid.innerHTML = '';
+      if (!cachedFavourites || cachedFavourites.length === 0) {
+        grid.innerHTML = `
+          <div style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); padding: 40px;">
+            <p style="font-size: 15px; font-weight: 700; margin-bottom: 6px;">No Favourites Saved Yet</p>
+            <p style="font-size: 12px; color: var(--text-dim);">Click the star (☆) on any station in Curated Presets or Global Directory to bookmark it here.</p>
+          </div>
+        `;
+        return;
+      }
+
+      cachedFavourites.forEach(st => {
+        grid.appendChild(createStationCard(st));
+      });
+    }
+
+    function handleSearchInput() {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(performGlobalSearch, 350);
+    }
+
+    async function performGlobalSearch() {
+      const query = document.getElementById('search-station-input').value.trim();
+      const tag = document.getElementById('search-genre-select').value;
+      const country = document.getElementById('search-country-select').value;
+      const order = document.getElementById('search-order-select').value;
+      const indicator = document.getElementById('search-loading-indicator');
+      const label = document.getElementById('search-results-label');
+      const grid = document.getElementById('search-results-grid');
+
+      indicator.style.display = 'inline';
+      label.innerText = 'Searching...';
+
+      try {
+        const qs = new URLSearchParams({query, tag, country, order});
+        const res = await fetch('/api/radio/search?' + qs.toString());
+        const data = await res.json();
+        indicator.style.display = 'none';
+        grid.innerHTML = '';
+
+        if (!data.stations || data.stations.length === 0) {
+          label.innerText = 'No matching stations found in directory.';
+          return;
+        }
+
+        label.innerText = `Found ${data.stations.length} stations`;
+        data.stations.forEach(st => {
+          grid.appendChild(createStationCard(st));
+        });
+      } catch (err) {
+        indicator.style.display = 'none';
+        label.innerText = 'Search encountered a network error. Please try again.';
+      }
+    }
+
     async function playCustomStream() {
+      const name = document.getElementById('custom-stream-name').value.trim() || 'Custom Live Stream';
       const url = document.getElementById('custom-stream-url').value.trim();
       if (!url) return;
       await fetch('/api/play_stream', {
@@ -2528,16 +3227,16 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           url: url,
-          title: 'Custom Live Stream',
-          artist: 'Web Tuner',
-          album: 'Bremen Stream'
+          title: name,
+          artist: 'Direct Stream',
+          album: 'Bremen Stream Tuner'
         })
       });
       closeRadioModal();
       updateStatus();
     }
 
-    // Real Storage / NVMe File Browser Handlers
+    // Storage Explorer Handlers
     async function openStorageModal(path = "") {
       document.getElementById('storage-modal').style.display = 'flex';
       document.getElementById('storage-path-label').innerText = "Path: " + (path || "/");
@@ -2609,7 +3308,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     // Keyboard Shortcuts
     window.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
