@@ -52,6 +52,26 @@ All indicators, features, and controls are connected directly to live hardware p
    * **Custom Stream Pipeline:** Direct URL streaming for custom HLS (`.m3u8`), Icecast, Shoutcast, or uncompressed bitstreams.
 5. **Real-Time Album Artwork Proxy:**
    * `/api/proxy_art` dynamically routes album covers from DLNA media servers or local storage without CORS or HTTPS mixed-content browser restrictions.
+6. **Bit-Perfect Fixed Line-Out Mode (Pre-amp Bypass / 0 dB Lock):**
+   * Locks digital volume attenuation at 100% (0 dB), eliminating resolution loss when connected to an external preamplifier or integrated amplifier.
+7. **ESS Sabre Digital Reconstruction Filters (FIR Profiles):**
+   * Configurable hardware digital filter modes: *Minimum Phase Fast Roll-off* (no pre-ringing, punchy transients), *Linear Phase Fast* (neutral reference), *Linear Phase Slow* (acoustic warmth), *Apodizing Fast* (ringing elimination), and *Brickwall*.
+8. **Dual Vintage Analogue VU Meters & Live Frequency Spectrum Analyser (RTA):**
+   * Switch between Album Artwork, Dual Retro Analogue VU Meters (Left/Right ballistic needles with dB calibration and gold backlighting), and a 10-band Real-Time Spectrum Analyser.
+9. **Audiophile Parametric Equaliser (PEQ) & Target Curves:**
+   * 5-band interactive DSP Parametric Equaliser (32 Hz, 120 Hz, 1 kHz, 4.5 kHz, 12 kHz) with real-time SVG frequency curve rendering and presets (*Harman Target Curve*, *Acoustic Warmth*, *Late-Night Mode*, *Vocal Presence*, *Flat Reference*).
+10. **Sleep Timer with Intelligent Soft Fade:**
+    * Configurable 15, 30, 45, or 60-minute sleep timer. Over the final 60 seconds, volume smoothly fades down to 0 before putting the Bremen SL1P into standby, automatically restoring morning listening volume.
+11. **Real-Time Track Lyrics & Liner Notes:**
+    * Automatically queries global metadata archives to display lyrics and release liner notes for currently playing tracks.
+12. **Network Latency & Jitter Diagnostic Monitor:**
+    * Real-time network probe tracking packet latency and jitter between the controller and the Bremen SL1P hardware (`<5 ms` optimal direct LAN indicator).
+13. **Active Play Queue & Listening History Log:**
+    * Full queue control (add, reorder, clear) plus a persistent history log of previously played tracks and radio stations with 1-click replay.
+14. **Progressive Web App (PWA) Mobile Installation:**
+    * Web manifest (`/manifest.json`) and service worker support. Tap "Add to Home Screen" on iOS Safari or Android Chrome to install a full-screen, frameless mobile app.
+15. **Refined Ultra-Light Luxury Typography:**
+    * Clean, elegant typography using the **`Outfit`** geometric font family (weights 200, 300, 400, 500) paired with **`JetBrains Mono`** for technical telemetry.
 
 ---
 
@@ -78,3 +98,5 @@ If you do not know the IP address of your streamer:
   * `Ctrl` / `Cmd` + `Left Arrow`: Previous track
   * `Up Arrow` / `Down Arrow`: Volume up / down by 2%
   * `M`: Mute / Unmute toggle
+  * `V`: Cycle visualiser view (Artwork ➔ Dual VU Meters ➔ Spectrum Analyser)
+
