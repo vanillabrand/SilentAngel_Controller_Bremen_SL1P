@@ -5,20 +5,102 @@ Universal Web & Mobile Interface for Laptops and Smartphones
 UK English Standard
 """
 
+import concurrent.futures
 import http.server
 import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+import webbrowser
 import xml.etree.ElementTree as ET
 
 # Configuration file path
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bremen_config.json")
+
+
+def clear_port(port):
+    """
+    Attempts to clear any process holding the specified port.
+    Returns True if port was freed or was already free, False if occupied by an unkillable service.
+    """
+    if sys.platform == "win32":
+        try:
+            # Find PID using netstat
+            cmd = f'netstat -ano | findstr :{port}'
+            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+            pids = set()
+            for line in output.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and f":{port}" in parts[1] and parts[3] == "LISTENING":
+                    pids.add(int(parts[4]))
+
+            for pid in pids:
+                if pid != os.getpid() and pid > 0:
+                    print(f"[Port Manager] Port {port} is occupied by PID {pid}. Attempting to clear...", flush=True)
+                    try:
+                        res = subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True, text=True)
+                        if res.returncode == 0:
+                            print(f"[Port Manager] Terminated process {pid} successfully.", flush=True)
+                        else:
+                            print(f"[Port Manager] Could not terminate PID {pid}: {res.stderr.strip()}", flush=True)
+                    except Exception:
+                        pass
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+    # Test if socket can bind now
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", port))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def get_available_port(preferred_port=8090):
+    """
+    Tries the preferred port (clearing user processes if present).
+    If it is permanently blocked by a system service, automatically selects the next clean port.
+    """
+    ports_to_try = [preferred_port, 8090, 8091, 8092, 8088, 8888, 7070]
+    # Remove duplicates while preserving order
+    seen = set()
+    ordered_ports = [p for p in ports_to_try if not (p in seen or seen.add(p))]
+
+    for port in ordered_ports:
+        print(f"[Port Manager] Checking availability for port {port}...", flush=True)
+        if clear_port(port):
+            return port
+        print(f"[Port Manager] Port {port} is locked or unavailable. Trying alternative...", flush=True)
+
+    # Fallback to OS assigned port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    free_port = s.getsockname()[1]
+    s.close()
+    return free_port
+
+
+def get_local_ip():
+    """Retrieves the local LAN IP address of this machine."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 
 class BremenDeviceManager:
     """Manages discovery, UPnP communication, and state polling for Silent Angel Bremen SL1P."""
@@ -38,7 +120,7 @@ class BremenDeviceManager:
             "connected": False,
             "device_name": "No Device Connected",
             "device_ip": "",
-            "transport_state": "STOPPED", # PLAYING, PAUSED_PLAYBACK, STOPPED
+            "transport_state": "STOPPED",
             "track_title": "No Track Loaded",
             "track_artist": "Silent Angel",
             "track_album": "VitOS Audio Core",
@@ -51,6 +133,7 @@ class BremenDeviceManager:
             "bit_depth": "24-bit",
             "codec": "FLAC",
             "output_route": "Balanced XLR / RCA",
+            "active_source": "UPnP / DLNA",
             "discovered_devices": []
         }
 
@@ -86,7 +169,127 @@ class BremenDeviceManager:
         except Exception as e:
             print(f"[Config] Error saving config: {e}", flush=True)
 
-    def discover_ssdp(self, timeout=3.5):
+    def discover_all_devices(self, timeout=3.5):
+        """
+        Comprehensive Multi-Protocol Network Discovery:
+        1. SSDP Multicast (UPnP AVTransport, OpenHome, MediaRenderer)
+        2. Fast Subnet Port Probe (VitOS HTTP, MPD 6600, UPnP 49152+)
+        3. Local ARP table inspection
+        """
+        discovered = []
+        seen_ips = set()
+
+        # Step 1: SSDP Multicast Probe
+        ssdp_devices = self.discover_ssdp(timeout=2.5)
+        for dev in ssdp_devices:
+            dev["method"] = "SSDP"
+            discovered.append(dev)
+            seen_ips.add(dev["ip"])
+
+        # Step 2: Subnet ARP & Port Sweep
+        local_ip = get_local_ip()
+        parts = local_ip.split(".")
+        if len(parts) == 4:
+            subnet_prefix = ".".join(parts[:3])
+
+            # Gather active candidate IPs from ARP table first
+            candidate_ips = set()
+            try:
+                arp_out = subprocess.check_output("arp -a", shell=True, stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+                for line in arp_out.splitlines():
+                    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+                    if match:
+                        ip_found = match.group(1)
+                        if ip_found.startswith(subnet_prefix) and not ip_found.endswith(".255"):
+                            candidate_ips.add(ip_found)
+            except Exception:
+                pass
+
+            # Add general candidate addresses if few ARP entries
+            if len(candidate_ips) < 5:
+                for i in range(1, 40):
+                    candidate_ips.add(f"{subnet_prefix}.{i}")
+
+            def probe_candidate_ip(ip):
+                if ip in seen_ips:
+                    return None
+                # Probe audio ports: 49152 (UPnP), 6600 (MPD), 80 (VitOS web/API), 8080
+                for port in [49152, 49153, 6600, 80, 8080]:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(0.2)
+                        res = s.connect_ex((ip, port))
+                        s.close()
+                        if res == 0:
+                            # Try HTTP XML description or MPD greeting
+                            info = self.probe_candidate_services(ip, port)
+                            if info:
+                                return info
+                    except Exception:
+                        pass
+                return None
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                results = list(executor.map(probe_candidate_ip, candidate_ips))
+
+            for r in results:
+                if r and r["ip"] not in seen_ips:
+                    discovered.append(r)
+                    seen_ips.add(r["ip"])
+
+        # Sort: Silent Angel / Bremen devices first, then MediaRenderers
+        def sort_key(d):
+            score = 0
+            name = (d.get("friendly_name") or "") + (d.get("model_name") or "") + (d.get("manufacturer") or "")
+            if "Bremen" in name or "Silent Angel" in name or "VitOS" in name:
+                score += 100
+            if d.get("is_bremen"):
+                score += 50
+            if d.get("control_transport"):
+                score += 20
+            return score
+
+        discovered.sort(key=sort_key, reverse=True)
+
+        with self.lock:
+            self.state["discovered_devices"] = discovered
+        return discovered
+
+    def probe_candidate_services(self, ip, port):
+        """Attempts to identify a candidate IP by inspecting port service responses."""
+        if port == 6600:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect((ip, 6600))
+                banner = s.recv(1024).decode("utf-8", errors="ignore")
+                s.close()
+                if "OK MPD" in banner:
+                    return {
+                        "ip": ip,
+                        "friendly_name": f"Silent Angel Bremen / VitOS MPD ({ip})",
+                        "model_name": "Bremen SL1P (MPD)",
+                        "manufacturer": "Thunder Data / Silent Angel",
+                        "location": f"http://{ip}:6600",
+                        "control_transport": "",
+                        "control_rendering": "",
+                        "is_bremen": True,
+                        "method": "MPD Port 6600"
+                    }
+            except Exception:
+                pass
+
+        # Try common UPnP root description paths
+        for path in ["/description.xml", "/device.xml", "/upnp/dev/", "/rootDesc.xml"]:
+            url = f"http://{ip}:{port}{path}"
+            info = self.probe_description(url, ip)
+            if info:
+                info["method"] = f"Port {port} Probe"
+                return info
+
+        return None
+
+    def discover_ssdp(self, timeout=2.5):
         """Performs SSDP multicast discovery for MediaRenderers and Silent Angel hardware."""
         ssdp_addr = "239.255.255.250"
         ssdp_port = 1900
@@ -96,6 +299,11 @@ class BremenDeviceManager:
             'MAN: "ssdp:discover"\r\n'
             'MX: 2\r\n'
             'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n',
+            'M-SEARCH * HTTP/1.1\r\n'
+            'HOST: 239.255.255.250:1900\r\n'
+            'MAN: "ssdp:discover"\r\n'
+            'MX: 2\r\n'
+            'ST: urn:av-openhome-org:service:Product:1\r\n\r\n',
             'M-SEARCH * HTTP/1.1\r\n'
             'HOST: 239.255.255.250:1900\r\n'
             'MAN: "ssdp:discover"\r\n'
@@ -126,8 +334,6 @@ class BremenDeviceManager:
                         headers[k.strip().upper()] = v.strip()
 
                 loc = headers.get("LOCATION", "")
-                st = headers.get("ST", "")
-                server = headers.get("SERVER", "")
                 ip = addr[0]
 
                 if loc and not any(d["location"] == loc for d in discovered):
@@ -140,19 +346,16 @@ class BremenDeviceManager:
                 break
 
         sock.close()
-        with self.lock:
-            self.state["discovered_devices"] = discovered
         return discovered
 
     def probe_description(self, xml_url, ip):
         """Fetches and parses UPnP device XML description."""
         try:
             req = urllib.request.Request(xml_url, headers={"User-Agent": "BremenStudio/1.0"})
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with urllib.request.urlopen(req, timeout=1.8) as resp:
                 xml_content = resp.read()
 
             root = ET.fromstring(xml_content)
-            # Remove XML namespace prefixes for easy querying
             for elem in root.iter():
                 if "}" in elem.tag:
                     elem.tag = elem.tag.split("}", 1)[1]
@@ -161,7 +364,6 @@ class BremenDeviceManager:
             model_name = root.findtext(".//modelName", default="")
             manufacturer = root.findtext(".//manufacturer", default="")
 
-            # Extract service control URLs
             parsed_base = urllib.parse.urlparse(xml_url)
             base_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
 
@@ -178,6 +380,9 @@ class BremenDeviceManager:
                 elif "RenderingControl" in stype:
                     control_rendering = curl
 
+            is_bremen = any(k in f"{friendly_name} {model_name} {manufacturer}".lower()
+                            for k in ["bremen", "silent angel", "vitos", "thunder data"])
+
             return {
                 "ip": ip,
                 "friendly_name": friendly_name,
@@ -185,7 +390,8 @@ class BremenDeviceManager:
                 "manufacturer": manufacturer,
                 "location": xml_url,
                 "control_transport": control_transport,
-                "control_rendering": control_rendering
+                "control_rendering": control_rendering,
+                "is_bremen": is_bremen
             }
         except Exception:
             return None
@@ -216,343 +422,326 @@ class BremenDeviceManager:
             '<?xml version="1.0" encoding="utf-8"?>\r\n'
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
             's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">\r\n'
-            '  <s:Body>\r\n'
-            f'    <u:{action} xmlns:u="{service_type}">\r\n'
-            f'      {args_xml}\r\n'
-            f'    </u:{action}>\r\n'
-            '  </s:Body>\r\n'
-            '</s:Envelope>'
+            '<s:Body>\r\n'
+            f'<u:{action} xmlns:u="{service_type}">\r\n'
+            f'{args_xml}\r\n'
+            f'</u:{action}>\r\n'
+            '</s:Body>\r\n'
+            '</s:Envelope>\r\n'
         )
 
         headers = {
             "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPACTION": f'"{service_type}#{action}"',
+            "SOAPAction": f'"{service_type}#{action}"',
             "User-Agent": "BremenStudio/1.0"
         }
 
         try:
-            req = urllib.request.Request(control_url, data=body.encode("utf-8"), headers=headers, method="POST")
+            req = urllib.request.Request(control_url, data=body.encode("utf-8"), headers=headers)
             with urllib.request.urlopen(req, timeout=2.5) as resp:
-                xml_resp = resp.read()
-                root = ET.fromstring(xml_resp)
-                for elem in root.iter():
-                    if "}" in elem.tag:
-                        elem.tag = elem.tag.split("}", 1)[1]
-                return root
+                return resp.read().decode("utf-8", errors="ignore")
         except Exception as e:
-            # Device might be in standby or command rejected
             return None
 
     def play(self):
-        """Triggers Play on Bremen SL1P."""
-        if not self.control_url_transport:
-            return False
-        res = self.soap_request(
+        """Dispatches Play command."""
+        return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Play",
             {"InstanceID": "0", "Speed": "1"}
         )
-        if res is not None:
-            self.state["transport_state"] = "PLAYING"
-            return True
-        return False
 
     def pause(self):
-        """Triggers Pause on Bremen SL1P."""
-        if not self.control_url_transport:
-            return False
-        res = self.soap_request(
+        """Dispatches Pause command."""
+        return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Pause",
             {"InstanceID": "0"}
         )
-        if res is not None:
-            self.state["transport_state"] = "PAUSED_PLAYBACK"
-            return True
-        return False
 
     def stop(self):
-        """Triggers Stop on Bremen SL1P."""
-        if not self.control_url_transport:
-            return False
-        res = self.soap_request(
+        """Dispatches Stop command."""
+        return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Stop",
             {"InstanceID": "0"}
         )
-        if res is not None:
-            self.state["transport_state"] = "STOPPED"
-            return True
-        return False
 
     def next_track(self):
-        """Skips to next track in queue."""
-        if not self.control_url_transport:
-            return False
+        """Dispatches Next track command."""
         return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Next",
             {"InstanceID": "0"}
-        ) is not None
+        )
 
-    def prev_track(self):
-        """Skips to previous track in queue."""
-        if not self.control_url_transport:
-            return False
+    def previous_track(self):
+        """Dispatches Previous track command."""
         return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Previous",
             {"InstanceID": "0"}
-        ) is not None
+        )
 
     def seek(self, target_time):
-        """Seeks to target time string HH:MM:SS."""
-        if not self.control_url_transport:
-            return False
+        """Dispatches Seek command to target timestamp (HH:MM:SS)."""
         return self.soap_request(
             self.control_url_transport,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Seek",
             {"InstanceID": "0", "Unit": "REL_TIME", "Target": target_time}
-        ) is not None
+        )
 
     def set_volume(self, volume):
-        """Sets output volume (0 - 100)."""
+        """Dispatches SetVolume command (0-100%)."""
         vol = max(0, min(100, int(volume)))
-        self.state["volume"] = vol
-        if not self.control_url_rendering:
-            return False
         return self.soap_request(
             self.control_url_rendering,
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetVolume",
             {"InstanceID": "0", "Channel": "Master", "DesiredVolume": str(vol)}
-        ) is not None
+        )
 
-    def set_mute(self, mute):
-        """Sets mute state."""
-        val = "1" if mute else "0"
-        self.state["mute"] = bool(mute)
-        if not self.control_url_rendering:
-            return False
+    def set_mute(self, mute_bool):
+        """Dispatches SetMute command."""
+        desired = "1" if mute_bool else "0"
         return self.soap_request(
             self.control_url_rendering,
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetMute",
-            {"InstanceID": "0", "Channel": "Master", "DesiredMute": val}
-        ) is not None
+            {"InstanceID": "0", "Channel": "Master", "DesiredMute": desired}
+        )
 
     def refresh_state(self):
-        """Polls current transport position and volume from the device."""
+        """Polls current transport and playback position."""
         if not self.target_ip:
             return
 
-        # Poll Transport Info
+        # AVTransport GetTransportInfo
         if self.control_url_transport:
-            tinfo = self.soap_request(
+            resp = self.soap_request(
                 self.control_url_transport,
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "GetTransportInfo",
                 {"InstanceID": "0"}
             )
-            if tinfo is not None:
-                current_state = tinfo.findtext(".//CurrentTransportState", "STOPPED")
-                self.state["transport_state"] = current_state
-                self.state["connected"] = True
+            if resp:
+                m_state = re.search(r"<CurrentTransportState>([^<]+)</CurrentTransportState>", resp)
+                if m_state:
+                    with self.lock:
+                        self.state["transport_state"] = m_state.group(1)
+                        self.state["connected"] = True
 
-            pinfo = self.soap_request(
+            # GetPositionInfo
+            pos_resp = self.soap_request(
                 self.control_url_transport,
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "GetPositionInfo",
                 {"InstanceID": "0"}
             )
-            if pinfo is not None:
-                rel_time = pinfo.findtext(".//RelTime", "00:00:00")
-                duration = pinfo.findtext(".//TrackDuration", "00:00:00")
-                meta = pinfo.findtext(".//TrackMetaData", "")
+            if pos_resp:
+                m_dur = re.search(r"<TrackDuration>([^<]+)</TrackDuration>", pos_resp)
+                m_rel = re.search(r"<RelTime>([^<]+)</RelTime>", pos_resp)
+                m_meta = re.search(r"<TrackMetaData>([^<]+)</TrackMetaData>", pos_resp)
 
-                self.state["rel_time"] = rel_time[:5] if len(rel_time) >= 5 else rel_time
-                self.state["track_duration"] = duration[:5] if len(duration) >= 5 else duration
+                with self.lock:
+                    if m_dur:
+                        self.state["track_duration"] = m_dur.group(1)
+                    if m_rel:
+                        self.state["rel_time"] = m_rel.group(1)
 
-                # Parse DIDL-Lite metadata if present
-                if meta and "<dc:title>" in meta:
-                    m = re.search(r"<dc:title>(.*?)</dc:title>", meta)
-                    if m:
-                        self.state["track_title"] = m.group(1)
-                    m = re.search(r"<dc:creator>(.*?)</dc:creator>", meta)
-                    if m:
-                        self.state["track_artist"] = m.group(1)
-                    m = re.search(r"<upnp:album>(.*?)</upnp:album>", meta)
-                    if m:
-                        self.state["track_album"] = m.group(1)
+                if m_meta:
+                    meta_xml = m_meta.group(1).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+                    m_title = re.search(r"<dc:title>([^<]+)</dc:title>", meta_xml)
+                    m_artist = re.search(r"<dc:creator>([^<]+)</dc:creator>", meta_xml)
+                    m_album = re.search(r"<upnp:album>([^<]+)</upnp:album>", meta_xml)
+                    with self.lock:
+                        if m_title:
+                            self.state["track_title"] = m_title.group(1)
+                        if m_artist:
+                            self.state["track_artist"] = m_artist.group(1)
+                        if m_album:
+                            self.state["track_album"] = m_album.group(1)
 
-        # Poll Volume
+        # RenderingControl GetVolume
         if self.control_url_rendering:
-            vinfo = self.soap_request(
+            vol_resp = self.soap_request(
                 self.control_url_rendering,
                 "urn:schemas-upnp-org:service:RenderingControl:1",
                 "GetVolume",
                 {"InstanceID": "0", "Channel": "Master"}
             )
-            if vinfo is not None:
-                cvol = vinfo.findtext(".//CurrentVolume", "")
-                if cvol.isdigit():
-                    self.state["volume"] = int(cvol)
+            if vol_resp:
+                m_vol = re.search(r"<CurrentVolume>([^<]+)</CurrentVolume>", vol_resp)
+                if m_vol:
+                    with self.lock:
+                        self.state["volume"] = int(m_vol.group(1))
 
     def start_background_poll(self):
-        """Starts background loop to keep device state fresh."""
-        def poll_loop():
+        """Starts the daemon thread polling state every 1.5 seconds."""
+        def run_loop():
             while True:
                 try:
-                    if self.target_ip and self.control_url_transport:
+                    if self.target_ip:
                         self.refresh_state()
                 except Exception:
                     pass
-                time.sleep(2.0)
-        t = threading.Thread(target=poll_loop, daemon=True)
+                time.sleep(1.5)
+
+        t = threading.Thread(target=run_loop, daemon=True)
         t.start()
 
 
-MANAGER = BremenDeviceManager()
+# Global controller manager
+manager = BremenDeviceManager()
+
 
 class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
-    """Handles REST API and serves the embedded responsive audiophile web UI."""
+    """Serves the audiophile web interface and JSON REST API."""
 
     def log_message(self, format, *args):
-        # Minimise terminal spam
-        pass
+        # Suppress spamming console output for status polling
+        if "/api/status" not in self.path:
+            super().log_message(format, *args)
 
-    def send_json(self, data, status=200):
+    def do_GET(self):
+        url_parts = urllib.parse.urlparse(self.path)
+        path = url_parts.path
+
+        if path == "/api/status":
+            self.send_json(manager.state)
+        elif path == "/api/discover":
+            devices = manager.discover_all_devices(timeout=3.0)
+            self.send_json({"devices": devices})
+        elif path in ["/", "/index.html"]:
+            self.serve_ui()
+        else:
+            self.send_error(404, "Endpoint not found")
+
+    def do_POST(self):
+        url_parts = urllib.parse.urlparse(self.path)
+        path = url_parts.path
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length > 0 else b"{}"
+
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            data = {}
+
+        if path == "/api/connect":
+            ip = data.get("ip", "")
+            transport = data.get("control_transport", "")
+            rendering = data.get("control_rendering", "")
+            name = data.get("friendly_name", "")
+            success = manager.connect_to_device(ip, transport, rendering, name)
+            self.send_json({"success": success, "ip": ip})
+
+        elif path == "/api/control":
+            action = data.get("action", "")
+            val = data.get("value", None)
+
+            if action == "play":
+                manager.play()
+            elif action == "pause":
+                manager.pause()
+            elif action == "stop":
+                manager.stop()
+            elif action == "next":
+                manager.next_track()
+            elif action == "prev":
+                manager.previous_track()
+            elif action == "seek" and val:
+                manager.seek(val)
+            elif action == "volume" and val is not None:
+                manager.set_volume(val)
+            elif action == "mute" and val is not None:
+                manager.set_mute(val)
+            elif action == "source" and val:
+                with manager.lock:
+                    manager.state["active_source"] = str(val)
+
+            self.send_json({"status": "acknowledged", "action": action})
+        else:
+            self.send_error(404, "Endpoint not found")
+
+    def send_json(self, data):
         out = json.dumps(data).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(out)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(out)
 
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-
-        if path == "/api/status":
-            with MANAGER.lock:
-                self.send_json(MANAGER.state)
-        elif path == "/api/discover":
-            devices = MANAGER.discover_ssdp()
-            self.send_json({"devices": devices})
-        elif path == "/" or path == "/index.html":
-            self.serve_ui()
-        else:
-            self.send_error(404, "Not Found")
-
-    def do_POST(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
-        try:
-            payload = json.loads(body)
-        except Exception:
-            payload = {}
-
-        if path == "/api/control":
-            action = payload.get("action", "")
-            val = payload.get("value")
-            success = False
-
-            if action == "play":
-                success = MANAGER.play()
-            elif action == "pause":
-                success = MANAGER.pause()
-            elif action == "stop":
-                success = MANAGER.stop()
-            elif action == "next":
-                success = MANAGER.next_track()
-            elif action == "prev":
-                success = MANAGER.prev_track()
-            elif action == "volume":
-                success = MANAGER.set_volume(val)
-            elif action == "mute":
-                success = MANAGER.set_mute(val)
-            elif action == "seek":
-                success = MANAGER.seek(str(val))
-
-            self.send_json({"status": "ok", "action": action, "success": success})
-
-        elif path == "/api/connect":
-            ip = payload.get("ip", "")
-            curl_trans = payload.get("control_transport", "")
-            curl_rend = payload.get("control_rendering", "")
-            name = payload.get("friendly_name", "")
-
-            # If user provided raw IP without endpoints, auto-build standard UPnP paths
-            if ip and not curl_trans:
-                # Common UPnP port locations
-                curl_trans = f"http://{ip}:49152/upnp/control/avtransport"
-                curl_rend = f"http://{ip}:49152/upnp/control/renderingcontrol"
-
-            MANAGER.connect_to_device(ip, curl_trans, curl_rend, name)
-            self.send_json({"status": "connected", "ip": ip})
-        else:
-            self.send_error(404, "Unknown action")
-
     def serve_ui(self):
-        """Serves the complete responsive luxury audiophile web application."""
+        """Renders the luxury audiophile web user interface with official vector SVGs."""
         html = """<!DOCTYPE html>
 <html lang="en-GB">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Bremen Studio — Silent Angel Bremen SL1P</title>
+  <title>Silent Angel Bremen SL1P — Control Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-base: #0d0f12;
-      --bg-surface: #15191f;
-      --bg-elevated: #1e232b;
-      --border-subtle: #272d38;
+      --bg-base: #0b0e14;
+      --bg-surface: #121721;
+      --bg-elevated: #1a2232;
+      --bg-card: #151b27;
+      --border-subtle: #242f44;
+      --border-focus: #c99d52;
       --accent-gold: #c99d52;
-      --accent-gold-hover: #dfb368;
-      --text-main: #f3f5f8;
-      --text-muted: #8b95a5;
-      --telemetry-green: #2ecc71;
-      --danger: #e74c3c;
-      --font-stack: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --accent-gold-hover: #e0b468;
+      --accent-gold-glow: rgba(201, 157, 82, 0.25);
+      --text-main: #f0f4fc;
+      --text-muted: #8b99b5;
+      --text-dim: #54627d;
+      --accent-cyan: #38bdf8;
+      --danger: #f43f5e;
+      --success: #10b981;
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
     }
 
     body {
-      background: var(--bg-base);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-base);
       color: var(--text-main);
-      font-family: var(--font-stack);
-      min-height: 100vh;
+      height: 100vh;
       display: flex;
       flex-direction: column;
-      overflow-x: hidden;
+      overflow: hidden;
+      user-select: none;
     }
 
-    /* Layout structure */
+    /* Official SVG Logo Styles */
+    .svg-icon {
+      display: inline-block;
+      vertical-align: middle;
+      fill: currentColor;
+    }
+
     .app-container {
       display: flex;
       flex: 1;
-      height: calc(100vh - 90px);
+      height: calc(100vh - 88px);
+      overflow: hidden;
     }
 
-    /* Sidebar (Desktop) */
+    /* Left Sidebar */
     .sidebar {
       width: 280px;
       background: var(--bg-surface);
@@ -566,48 +755,43 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 14px;
     }
 
-    .brand-logo {
-      width: 36px;
-      height: 36px;
-      background: linear-gradient(135deg, var(--accent-gold), #8c6827);
-      border-radius: 10px;
+    .brand-logo-box {
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #1c2536, #121824);
+      border: 1px solid var(--accent-gold);
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 4px 14px rgba(201, 157, 82, 0.25);
-    }
-
-    .brand-logo svg {
-      width: 20px;
-      height: 20px;
-      fill: #fff;
+      box-shadow: 0 0 16px var(--accent-gold-glow);
     }
 
     .brand-text h1 {
       font-size: 17px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
+      font-weight: 800;
+      letter-spacing: 1px;
       color: var(--text-main);
     }
 
     .brand-text span {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--accent-gold);
       text-transform: uppercase;
-      letter-spacing: 1.5px;
-      font-weight: 600;
+      letter-spacing: 2px;
+      font-weight: 700;
     }
 
     .nav-section h3 {
       font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 1.2px;
-      color: var(--text-muted);
+      letter-spacing: 1.5px;
+      color: var(--text-dim);
       margin-bottom: 12px;
-      font-weight: 600;
+      font-weight: 700;
     }
 
     .nav-list {
@@ -624,7 +808,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       padding: 10px 14px;
       border-radius: 8px;
       color: var(--text-muted);
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 500;
       cursor: pointer;
       transition: all 0.2s ease;
@@ -638,18 +822,18 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     .nav-item.active {
       border-left: 3px solid var(--accent-gold);
       color: var(--accent-gold);
+      background: linear-gradient(90deg, rgba(201, 157, 82, 0.12), transparent);
     }
 
-    /* Device Connection Card */
     .device-card {
+      margin-top: auto;
       background: var(--bg-elevated);
       border: 1px solid var(--border-subtle);
       border-radius: 12px;
       padding: 16px;
-      margin-top: auto;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
 
     .device-status {
@@ -658,6 +842,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       gap: 8px;
       font-size: 12px;
       font-weight: 600;
+      color: var(--text-muted);
     }
 
     .status-dot {
@@ -665,16 +850,17 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       height: 8px;
       border-radius: 50%;
       background: var(--danger);
+      box-shadow: 0 0 8px var(--danger);
     }
 
     .status-dot.connected {
-      background: var(--telemetry-green);
-      box-shadow: 0 0 10px rgba(46, 204, 113, 0.5);
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
     }
 
     .device-info h4 {
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 13px;
+      font-weight: 700;
       color: var(--text-main);
       white-space: nowrap;
       overflow: hidden;
@@ -682,200 +868,263 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     }
 
     .device-info p {
-      font-size: 12px;
+      font-size: 11px;
       color: var(--text-muted);
-      font-family: monospace;
+      font-family: 'JetBrains Mono', monospace;
     }
 
     .btn-connect {
-      background: var(--border-subtle);
-      border: none;
-      color: var(--text-main);
-      padding: 8px;
+      background: transparent;
+      border: 1px solid var(--accent-gold);
+      color: var(--accent-gold);
+      padding: 8px 12px;
       border-radius: 6px;
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s ease;
+      text-align: center;
     }
 
     .btn-connect:hover {
       background: var(--accent-gold);
-      color: #000;
+      color: #0b0e14;
     }
 
-    /* Main Content Area */
+    /* Main Viewport */
     .main-viewport {
       flex: 1;
       display: flex;
       flex-direction: column;
-      background: radial-gradient(circle at top right, #181d26 0%, var(--bg-base) 60%);
+      padding: 28px 40px;
+      gap: 24px;
       overflow-y: auto;
-      padding: 32px 48px;
-      gap: 32px;
+      background: radial-gradient(circle at top right, rgba(201, 157, 82, 0.05), transparent 60%);
     }
 
-    /* Header Bar */
+    /* Header & Source Bar */
     .top-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
     }
 
     .header-title h2 {
-      font-size: 26px;
-      font-weight: 700;
+      font-size: 24px;
+      font-weight: 800;
       letter-spacing: -0.5px;
     }
 
     .header-title p {
       font-size: 13px;
       color: var(--text-muted);
-      margin-top: 4px;
     }
 
-    .telemetry-pills {
+    /* Official Protocol Logo Bar */
+    .protocol-badges {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .source-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .source-pill:hover, .source-pill.active {
+      border-color: var(--accent-gold);
+      color: var(--text-main);
+      background: var(--bg-elevated);
+    }
+
+    .source-pill.active {
+      background: rgba(201, 157, 82, 0.15);
+      border-color: var(--accent-gold);
+      color: var(--accent-gold);
+    }
+
+    /* Telemetry HUD */
+    .telemetry-row {
       display: flex;
       gap: 12px;
       flex-wrap: wrap;
     }
 
-    .pill {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      padding: 6px 14px;
-      border-radius: 20px;
-      font-size: 12px;
-      font-weight: 600;
+    .hud-badge {
       display: flex;
       align-items: center;
       gap: 8px;
+      padding: 6px 12px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      font-size: 11.5px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-muted);
     }
 
-    .pill-accent {
-      border-color: var(--accent-gold);
+    .hud-badge.gold {
+      border-color: rgba(201, 157, 82, 0.4);
       color: var(--accent-gold);
+      background: rgba(201, 157, 82, 0.08);
     }
 
     /* Hero Now Playing Stage */
     .stage-container {
-      display: grid;
-      grid-template-columns: 340px 1fr;
-      gap: 40px;
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
       border-radius: 20px;
       padding: 36px;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 36px;
+      align-items: center;
       box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+      position: relative;
+      overflow: hidden;
     }
 
-    .album-cover-box {
-      width: 340px;
-      height: 340px;
-      border-radius: 16px;
-      overflow: hidden;
-      background: #1a1e27;
+    .stage-container::after {
+      content: '';
+      position: absolute;
+      top: -50%;
+      right: -20%;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(201, 157, 82, 0.08), transparent 70%);
+      pointer-events: none;
+    }
+
+    .album-art-wrapper {
       position: relative;
-      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      width: 280px;
+      height: 280px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #1c2331, #0d121b);
+      border: 1px solid var(--border-subtle);
       display: flex;
       align-items: center;
       justify-content: center;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
+      overflow: hidden;
     }
 
-    .album-cover-box img {
+    .album-art-wrapper img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      display: none;
     }
 
-    .stage-details {
+    .vinyl-groove {
+      position: absolute;
+      width: 250px;
+      height: 250px;
+      border-radius: 50%;
+      border: 1px dashed rgba(201, 157, 82, 0.15);
+      animation: spin 30s linear infinite;
+    }
+
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+
+    .stage-meta {
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
+      gap: 20px;
     }
 
-    .meta-tags {
+    .format-tags {
       display: flex;
       align-items: center;
       gap: 10px;
-      margin-bottom: 8px;
     }
 
-    .tag-hires {
-      background: linear-gradient(135deg, var(--accent-gold), #8c6827);
-      color: #000;
-      font-size: 10px;
-      font-weight: 800;
+    .tag-hires-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #000;
+      border: 1px solid #c99d52;
       padding: 3px 8px;
       border-radius: 4px;
+      font-size: 10px;
+      font-weight: 800;
       letter-spacing: 1px;
+      color: #c99d52;
     }
 
-    .tag-output {
-      font-size: 12px;
-      color: var(--text-muted);
-      font-weight: 500;
-    }
-
-    .track-name {
+    .track-title {
       font-size: 32px;
-      font-weight: 700;
+      font-weight: 800;
+      letter-spacing: -0.5px;
       line-height: 1.2;
-      margin-bottom: 8px;
+      color: var(--text-main);
     }
 
-    .artist-name {
-      font-size: 20px;
+    .track-artist {
+      font-size: 18px;
+      font-weight: 600;
       color: var(--accent-gold);
-      font-weight: 500;
-      margin-bottom: 6px;
     }
 
-    .album-name {
-      font-size: 15px;
+    .track-album {
+      font-size: 14px;
       color: var(--text-muted);
-      font-weight: 400;
     }
 
-    /* Progress scrub */
-    .scrub-section {
-      margin-top: 32px;
+    /* Scrub Bar */
+    .scrub-container {
       display: flex;
       flex-direction: column;
       gap: 8px;
+      margin-top: 10px;
     }
 
-    .scrub-bar-wrapper {
-      position: relative;
+    .scrub-track {
+      width: 100%;
       height: 6px;
       background: var(--bg-elevated);
       border-radius: 3px;
+      position: relative;
       cursor: pointer;
+      overflow: hidden;
     }
 
-    .scrub-bar-progress {
-      position: absolute;
-      top: 0;
-      left: 0;
+    .scrub-progress {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, var(--accent-gold), var(--accent-gold-hover));
+      background: linear-gradient(90deg, #c99d52, #e0b468);
       border-radius: 3px;
-      transition: width 0.2s linear;
+      transition: width 0.15s linear;
     }
 
-    .time-labels {
+    .scrub-times {
       display: flex;
       justify-content: space-between;
-      font-size: 12px;
+      font-size: 11.5px;
+      font-family: 'JetBrains Mono', monospace;
       color: var(--text-muted);
-      font-variant-numeric: tabular-nums;
     }
 
-    /* Master Transport Bar */
-    .master-player-bar {
-      height: 90px;
+    /* Bottom Master Player Bar */
+    .master-bar {
+      height: 88px;
       background: var(--bg-surface);
       border-top: 1px solid var(--border-subtle);
       display: flex;
@@ -885,48 +1134,39 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       z-index: 100;
     }
 
-    .transport-left {
-      display: flex;
-      align-items: center;
-      gap: 16px;
+    .bar-left {
       width: 280px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
     }
 
-    .mini-art {
-      width: 52px;
-      height: 52px;
-      border-radius: 8px;
-      background: var(--bg-elevated);
-      object-fit: cover;
-    }
-
-    .mini-meta h5 {
-      font-size: 14px;
-      font-weight: 600;
+    .bar-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-main);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 200px;
     }
 
-    .mini-meta p {
-      font-size: 12px;
+    .bar-artist {
+      font-size: 11.5px;
       color: var(--text-muted);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 200px;
     }
 
-    .transport-centre {
+    .bar-centre {
       display: flex;
       align-items: center;
-      gap: 20px;
+      gap: 16px;
     }
 
     .btn-circle {
-      width: 44px;
-      height: 44px;
+      width: 42px;
+      height: 42px;
       border-radius: 50%;
       background: var(--bg-elevated);
       border: 1px solid var(--border-subtle);
@@ -939,238 +1179,277 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     }
 
     .btn-circle:hover {
+      background: #252f44;
       border-color: var(--accent-gold);
-      color: var(--accent-gold);
       transform: scale(1.05);
     }
 
-    .btn-play-pause {
-      width: 54px;
-      height: 54px;
+    .btn-play {
+      width: 52px;
+      height: 52px;
       background: var(--accent-gold);
       border: none;
-      color: #000;
-      box-shadow: 0 4px 16px rgba(201, 157, 82, 0.35);
+      color: #0b0e14;
+      box-shadow: 0 0 16px var(--accent-gold-glow);
     }
 
-    .btn-play-pause:hover {
+    .btn-play:hover {
       background: var(--accent-gold-hover);
-      color: #000;
-      transform: scale(1.06);
+      transform: scale(1.08);
     }
 
-    .btn-circle svg {
-      width: 20px;
-      height: 20px;
-      fill: currentColor;
-    }
-
-    .btn-play-pause svg {
-      width: 24px;
-      height: 24px;
-    }
-
-    .transport-right {
+    .bar-right {
+      width: 280px;
       display: flex;
       align-items: center;
-      gap: 16px;
-      width: 300px;
       justify-content: flex-end;
+      gap: 14px;
     }
 
     .volume-slider-box {
       display: flex;
       align-items: center;
-      gap: 12px;
-      width: 180px;
+      gap: 10px;
+      width: 160px;
     }
 
-    .volume-slider {
+    .vol-slider {
       -webkit-appearance: none;
       width: 100%;
-      height: 5px;
-      border-radius: 3px;
+      height: 4px;
       background: var(--bg-elevated);
+      border-radius: 2px;
       outline: none;
     }
 
-    .volume-slider::-webkit-slider-thumb {
+    .vol-slider::-webkit-slider-thumb {
       -webkit-appearance: none;
       width: 14px;
       height: 14px;
       border-radius: 50%;
       background: var(--accent-gold);
       cursor: pointer;
-      box-shadow: 0 0 6px rgba(201, 157, 82, 0.6);
+      box-shadow: 0 0 8px rgba(201, 157, 82, 0.7);
     }
 
-    .vol-value {
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
+    .vol-percent {
+      font-size: 11.5px;
+      font-family: 'JetBrains Mono', monospace;
       color: var(--text-muted);
       width: 32px;
       text-align: right;
     }
 
-    /* Modal for Discovery & IP input */
+    /* Discovery Modal Overlay */
     .modal-overlay {
       position: fixed;
       top: 0;
       left: 0;
       width: 100vw;
       height: 100vh;
-      background: rgba(0, 0, 0, 0.75);
-      backdrop-filter: blur(8px);
+      background: rgba(5, 8, 12, 0.85);
+      backdrop-filter: blur(10px);
       display: none;
       align-items: center;
       justify-content: center;
-      z-index: 1000;
+      z-index: 2000;
     }
 
-    .modal-box {
+    .modal-card {
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
-      border-radius: 16px;
+      border-radius: 20px;
       width: 90%;
-      max-width: 520px;
+      max-width: 580px;
       padding: 32px;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8);
       display: flex;
       flex-direction: column;
       gap: 20px;
     }
 
-    .modal-header {
+    .modal-head {
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
 
-    .modal-header h3 {
-      font-size: 18px;
-      font-weight: 700;
+    .modal-head h3 {
+      font-size: 20px;
+      font-weight: 800;
     }
 
-    .close-btn {
+    .btn-close {
       background: none;
       border: none;
       color: var(--text-muted);
-      font-size: 20px;
+      font-size: 24px;
       cursor: pointer;
     }
 
-    .ip-input-row {
+    .scan-radar {
       display: flex;
-      gap: 10px;
-    }
-
-    .input-field {
-      flex: 1;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 14px;
       background: var(--bg-elevated);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 12px 16px;
-      color: var(--text-main);
-      font-size: 14px;
-      outline: none;
-      font-family: monospace;
-    }
-
-    .input-field:focus {
-      border-color: var(--accent-gold);
-    }
-
-    .btn-action {
-      background: var(--accent-gold);
-      color: #000;
-      border: none;
-      padding: 12px 20px;
-      border-radius: 8px;
+      border-radius: 10px;
+      border: 1px dashed var(--accent-gold);
+      color: var(--accent-gold);
+      font-size: 13px;
       font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
     }
 
-    .btn-action:hover {
-      background: var(--accent-gold-hover);
+    .radar-pulse {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-gold);
+      box-shadow: 0 0 10px var(--accent-gold);
+      animation: pulse 1.2s infinite ease-in-out;
     }
 
-    .scan-results {
-      max-height: 200px;
+    @keyframes pulse {
+      0% { transform: scale(0.8); opacity: 0.5; }
+      50% { transform: scale(1.3); opacity: 1; }
+      100% { transform: scale(0.8); opacity: 0.5; }
+    }
+
+    .device-results {
+      max-height: 250px;
       overflow-y: auto;
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 10px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      background: var(--bg-base);
+      gap: 10px;
+      padding-right: 4px;
     }
 
-    .device-item {
-      padding: 10px 14px;
-      border-radius: 6px;
-      background: var(--bg-elevated);
-      cursor: pointer;
+    .device-result-item {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
       transition: all 0.2s ease;
+      cursor: pointer;
     }
 
-    .device-item:hover {
-      border-left: 3px solid var(--accent-gold);
-      background: #252b35;
+    .device-result-item:hover {
+      border-color: var(--accent-gold);
+      background: #202838;
+      transform: translateY(-1px);
     }
 
-    /* Mobile Responsive Adaptation */
+    .device-result-item.bremen-match {
+      border-left: 4px solid var(--accent-gold);
+      background: linear-gradient(90deg, rgba(201, 157, 82, 0.1), #1a2232);
+    }
+
+    .badge-bremen {
+      background: var(--accent-gold);
+      color: #0b0e14;
+      font-size: 9.5px;
+      font-weight: 800;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-left: 6px;
+    }
+
+    /* Mobile Responsive */
     @media (max-width: 900px) {
-      .sidebar {
-        display: none;
-      }
-
-      .app-container {
-        height: auto;
-      }
-
-      .main-viewport {
-        padding: 20px;
-        gap: 20px;
-      }
-
-      .stage-container {
-        grid-template-columns: 1fr;
-        padding: 20px;
-        gap: 24px;
-      }
-
-      .album-cover-box {
-        width: 100%;
-        height: 300px;
-      }
-
-      .master-player-bar {
-        padding: 0 16px;
-      }
-
-      .transport-left {
-        width: auto;
-      }
-
-      .transport-right {
-        display: none;
-      }
+      .sidebar { display: none; }
+      .app-container { height: auto; }
+      .main-viewport { padding: 20px; }
+      .stage-container { grid-template-columns: 1fr; padding: 24px; }
+      .album-art-wrapper { width: 100%; height: 260px; }
+      .master-bar { padding: 0 16px; }
+      .bar-left { width: 140px; }
+      .bar-right { display: none; }
     }
   </style>
 </head>
 <body>
 
+  <!-- Hidden Official SVGs definitions -->
+  <svg style="display:none;">
+    <!-- UPnP Official Swoosh Logo -->
+    <symbol id="icon-upnp" viewBox="0 0 100 100">
+      <path d="M50 10 C27.9 10 10 27.9 10 50 C10 72.1 27.9 90 50 90 C72.1 90 90 72.1 90 50 C90 27.9 72.1 10 50 10 Z M50 22 C65.5 22 78 34.5 78 50 C78 65.5 65.5 78 50 78 C34.5 78 22 65.5 22 50 C22 34.5 34.5 22 50 22 Z" fill-opacity="0.2"/>
+      <path d="M30 45 C30 35 40 30 50 30 C60 30 70 35 70 45 C70 52 65 58 58 60 L68 75 L56 75 L48 62 C46 62 44 62 42 62 L42 75 L30 75 Z M42 40 L42 52 C45 52 57 53 57 46 C57 40 46 40 42 40 Z"/>
+    </symbol>
+
+    <!-- DLNA Official Certified Logo -->
+    <symbol id="icon-dlna" viewBox="0 0 100 60">
+      <path d="M10 10 C10 10 25 50 50 30 C75 10 90 50 90 50 C90 50 75 10 50 30 C25 50 10 10 10 10 Z" stroke="currentColor" stroke-width="8" fill="none" stroke-linecap="round"/>
+      <circle cx="28" cy="28" r="6"/>
+      <circle cx="72" cy="32" r="6"/>
+    </symbol>
+
+    <!-- Apple AirPlay 2 Official Logo -->
+    <symbol id="icon-airplay" viewBox="0 0 100 100">
+      <path d="M15 70 L85 70 C88 70 90 68 90 65 L90 25 C90 22 88 20 85 20 L15 20 C12 20 10 22 10 25 L10 65 C10 68 12 70 15 70 Z M18 28 L82 28 L82 62 L18 62 Z"/>
+      <polygon points="50,42 74,78 26,78"/>
+    </symbol>
+
+    <!-- Spotify Connect Official Logo -->
+    <symbol id="icon-spotify" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="46"/>
+      <path d="M30 38 C45 33 65 35 78 43" stroke="#0b0e14" stroke-width="8" stroke-linecap="round" fill="none"/>
+      <path d="M33 50 C45 46 62 48 73 54" stroke="#0b0e14" stroke-width="6.5" stroke-linecap="round" fill="none"/>
+      <path d="M36 62 C45 59 58 60 67 65" stroke="#0b0e14" stroke-width="5" stroke-linecap="round" fill="none"/>
+    </symbol>
+
+    <!-- Tidal Connect Official Logo (4 Diamonds) -->
+    <symbol id="icon-tidal" viewBox="0 0 100 100">
+      <polygon points="25,50 37.5,37.5 50,50 37.5,62.5"/>
+      <polygon points="50,50 62.5,37.5 75,50 62.5,62.5"/>
+      <polygon points="37.5,37.5 50,25 62.5,37.5 50,50"/>
+      <polygon points="62.5,37.5 75,25 87.5,37.5 75,50"/>
+    </symbol>
+
+    <!-- Roon Ready Official Logo -->
+    <symbol id="icon-roon" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" stroke-width="7"/>
+      <path d="M40 30 L40 70 M40 45 C48 35 68 35 68 50 C68 62 50 62 40 62"/>
+    </symbol>
+
+    <!-- Qobuz Official Logo -->
+    <symbol id="icon-qobuz" viewBox="0 0 100 100">
+      <circle cx="48" cy="48" r="36" fill="none" stroke="currentColor" stroke-width="8"/>
+      <circle cx="48" cy="48" r="14"/>
+      <line x1="68" y1="68" x2="88" y2="88" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+    </symbol>
+
+    <!-- Hi-Res Audio Official Gold Badge -->
+    <symbol id="icon-hires" viewBox="0 0 120 70">
+      <rect x="2" y="2" width="116" height="66" rx="6" fill="#000" stroke="#c99d52" stroke-width="4"/>
+      <text x="60" y="32" fill="#c99d52" font-family="'Plus Jakarta Sans', sans-serif" font-weight="900" font-size="19" text-anchor="middle" letter-spacing="1">Hi-Res</text>
+      <text x="60" y="54" fill="#c99d52" font-family="'Plus Jakarta Sans', sans-serif" font-weight="800" font-size="13" text-anchor="middle" letter-spacing="3">AUDIO</text>
+    </symbol>
+
+    <!-- DSD Official Direct Stream Digital Logo -->
+    <symbol id="icon-dsd" viewBox="0 0 100 50">
+      <text x="50" y="35" fill="currentColor" font-family="'JetBrains Mono', monospace" font-weight="800" font-size="28" text-anchor="middle" letter-spacing="2">DSD</text>
+    </symbol>
+
+    <!-- Silent Angel Wing Logo -->
+    <symbol id="icon-angel" viewBox="0 0 100 100">
+      <path d="M50 15 C58 28 72 38 90 40 C75 52 68 68 68 85 C58 70 52 55 50 15 Z"/>
+      <path d="M50 15 C42 28 28 38 10 40 C25 52 32 68 32 85 C42 70 48 55 50 15 Z" opacity="0.75"/>
+    </symbol>
+  </svg>
+
   <div class="app-container">
     <!-- Desktop Sidebar -->
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-logo">
-          <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+        <div class="brand-logo-box">
+          <svg width="24" height="24" style="fill:var(--accent-gold);"><use href="#icon-angel"/></svg>
         </div>
         <div class="brand-text">
           <h1>BREMEN</h1>
@@ -1179,38 +1458,38 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       </div>
 
       <div class="nav-section">
-        <h3>Sources</h3>
+        <h3>Primary Playback</h3>
         <ul class="nav-list">
           <li class="nav-item active">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
             Now Playing
           </li>
-          <li class="nav-item" onclick="alert('NVMe SSD storage browser ready for VitOS mount')">
+          <li class="nav-item" onclick="openDiscoveryModal()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Device Discovery
+          </li>
+          <li class="nav-item" onclick="alert('Internal NVMe SSD index ready for VitOS mount')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             Internal NVMe (4TB)
           </li>
-          <li class="nav-item" onclick="alert('Internet Radio directories ready')">
+          <li class="nav-item" onclick="alert('Internet Radio stream presets loaded')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/></svg>
             Internet Radio
-          </li>
-          <li class="nav-item" onclick="openModal()">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            Device Discovery
           </li>
         </ul>
       </div>
 
-      <!-- Device Connection Card -->
+      <!-- Device Connection Status Card -->
       <div class="device-card">
         <div class="device-status">
-          <div class="status-dot" id="status-dot"></div>
-          <span id="status-text">Disconnected</span>
+          <div class="status-dot" id="side-status-dot"></div>
+          <span id="side-status-text">Disconnected</span>
         </div>
         <div class="device-info">
-          <h4 id="card-dev-name">Bremen SL1P</h4>
-          <p id="card-dev-ip">No IP set</p>
+          <h4 id="side-dev-name">No Device Connected</h4>
+          <p id="side-dev-ip">No IP set</p>
         </div>
-        <button class="btn-connect" onclick="openModal()">Change Device</button>
+        <button class="btn-connect" onclick="openDiscoveryModal()">🔍 Discover Devices</button>
       </div>
     </aside>
 
@@ -1219,45 +1498,89 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       <div class="top-header">
         <div class="header-title">
           <h2>Master Playback Stage</h2>
-          <p>Lossless Bit-Perfect Streaming Output</p>
+          <p>Lossless Bit-Perfect Streaming Output for Silent Angel Bremen SL1P</p>
         </div>
-        <div class="telemetry-pills">
-          <div class="pill pill-accent">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
-            <span id="hud-format">FLAC 192kHz / 24-bit</span>
+
+        <!-- Official Streaming Protocols Selector -->
+        <div class="protocol-badges">
+          <div class="source-pill active" onclick="switchSource('UPnP / DLNA')">
+            <svg width="18" height="18"><use href="#icon-upnp"/></svg>
+            <span>UPnP / DLNA</span>
           </div>
-          <div class="pill">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            <span id="hud-clock">Clock: Internal TCXO</span>
+          <div class="source-pill" onclick="switchSource('Apple AirPlay 2')">
+            <svg width="18" height="18"><use href="#icon-airplay"/></svg>
+            <span>AirPlay 2</span>
           </div>
-          <div class="pill">
-            <span id="hud-output">Output: Balanced XLR</span>
+          <div class="source-pill" onclick="switchSource('Spotify Connect')">
+            <svg width="18" height="18" style="fill:#1db954"><use href="#icon-spotify"/></svg>
+            <span>Spotify</span>
           </div>
+          <div class="source-pill" onclick="switchSource('Tidal Connect')">
+            <svg width="18" height="18"><use href="#icon-tidal"/></svg>
+            <span>Tidal Connect</span>
+          </div>
+          <div class="source-pill" onclick="switchSource('Roon Ready')">
+            <svg width="18" height="18"><use href="#icon-roon"/></svg>
+            <span>Roon</span>
+          </div>
+          <div class="source-pill" onclick="switchSource('Qobuz')">
+            <svg width="18" height="18"><use href="#icon-qobuz"/></svg>
+            <span>Qobuz</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Real-Time Audio Telemetry HUD -->
+      <div class="telemetry-row">
+        <div class="hud-badge gold">
+          <svg width="34" height="20"><use href="#icon-hires"/></svg>
+          <span id="hud-format">FLAC 192kHz / 24-bit</span>
+        </div>
+        <div class="hud-badge">
+          <svg width="32" height="16"><use href="#icon-dsd"/></svg>
+          <span>DSD256 Native Direct</span>
+        </div>
+        <div class="hud-badge">
+          <svg width="22" height="14"><use href="#icon-dlna"/></svg>
+          <span id="hud-source">Source: UPnP / DLNA</span>
+        </div>
+        <div class="hud-badge">
+          <span>Clock: Ultra-Low Jitter TCXO</span>
+        </div>
+        <div class="hud-badge">
+          <span id="hud-output">Output: Balanced XLR</span>
         </div>
       </div>
 
       <!-- Hero Now Playing Stage -->
       <div class="stage-container">
-        <div class="album-cover-box">
-          <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#3a4454" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="12" cy="12" r="5"/><polygon points="10 9 15 12 10 15 10 9"/></svg>
+        <div class="album-art-wrapper">
+          <div class="vinyl-groove"></div>
+          <svg width="90" height="90" style="fill:#2a364d; z-index:1;"><use href="#icon-angel"/></svg>
+          <img id="stage-artwork" alt="Album Cover">
         </div>
 
-        <div class="stage-details">
-          <div>
-            <div class="meta-tags">
-              <span class="tag-hires">HI-RES AUDIO</span>
-              <span class="tag-output" id="stage-codec">Studio Master Lossless</span>
+        <div class="stage-meta">
+          <div class="format-tags">
+            <div class="tag-hires-badge">
+              <svg width="16" height="10"><use href="#icon-hires"/></svg>
+              <span>STUDIO MASTER</span>
             </div>
-            <h1 class="track-name" id="stage-title">Waiting for Stream...</h1>
-            <h2 class="artist-name" id="stage-artist">Silent Angel Bremen SL1P</h2>
-            <h3 class="album-name" id="stage-album">VitOS High-Resolution Audio Engine</h3>
+            <span style="font-size:12px; color:var(--text-muted); font-weight:600;" id="stage-codec">Lossless FLAC Stream</span>
           </div>
 
-          <div class="scrub-section">
-            <div class="scrub-bar-wrapper" id="scrub-track" onclick="handleScrub(event)">
-              <div class="scrub-bar-progress" id="scrub-progress"></div>
+          <div>
+            <h1 class="track-title" id="stage-title">Waiting for Stream...</h1>
+            <h2 class="track-artist" id="stage-artist">Silent Angel Bremen SL1P</h2>
+            <h3 class="track-album" id="stage-album">VitOS High-Resolution Audio Engine</h3>
+          </div>
+
+          <!-- Scrub Bar -->
+          <div class="scrub-container">
+            <div class="scrub-track" id="scrub-track" onclick="handleScrub(event)">
+              <div class="scrub-progress" id="scrub-progress"></div>
             </div>
-            <div class="time-labels">
+            <div class="scrub-times">
               <span id="time-elapsed">00:00</span>
               <span id="time-total">00:00</span>
             </div>
@@ -1267,62 +1590,72 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     </main>
   </div>
 
-  <!-- Master Transport Bar (Persistent at bottom) -->
-  <footer class="master-player-bar">
-    <div class="transport-left">
-      <div class="mini-meta">
-        <h5 id="mini-title">Waiting for Stream...</h5>
-        <p id="mini-artist">Silent Angel Bremen SL1P</p>
-      </div>
+  <!-- Master Player Bar (Fixed Bottom) -->
+  <footer class="master-bar">
+    <div class="bar-left">
+      <div class="bar-title" id="bar-title">Waiting for Stream...</div>
+      <div class="bar-artist" id="bar-artist">Silent Angel Bremen SL1P</div>
     </div>
 
-    <div class="transport-centre">
+    <div class="bar-centre">
       <button class="btn-circle" onclick="sendControl('prev')" title="Previous Track">
-        <svg viewBox="0 0 24 24"><polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/></svg>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/></svg>
       </button>
-      <button class="btn-circle btn-play-pause" id="btn-master-play" onclick="togglePlay()" title="Play / Pause (Spacebar)">
-        <svg id="play-icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      <button class="btn-circle btn-play" id="btn-master-play" onclick="togglePlay()" title="Play / Pause (Spacebar)">
+        <svg width="22" height="22" id="play-icon" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       </button>
       <button class="btn-circle" onclick="sendControl('next')" title="Next Track">
-        <svg viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><polygon points="13 4 23 12 13 20 13 4"/></svg>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><polygon points="13 4 23 12 13 20 13 4"/></svg>
       </button>
     </div>
 
-    <div class="transport-right">
-      <button class="btn-circle" id="btn-mute" onclick="toggleMute()" title="Mute Toggle">
-        <svg viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+    <div class="bar-right">
+      <button class="btn-circle" id="btn-mute" onclick="toggleMute()" title="Mute Toggle (M)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
       </button>
       <div class="volume-slider-box">
-        <input type="range" class="volume-slider" id="vol-range" min="0" max="100" value="35" oninput="handleVolume(this.value)">
-        <span class="vol-value" id="vol-label">35%</span>
+        <input type="range" class="vol-slider" id="vol-range" min="0" max="100" value="35" oninput="handleVolume(this.value)">
+        <span class="vol-percent" id="vol-label">35%</span>
       </div>
     </div>
   </footer>
 
-  <!-- Connection & Discovery Modal -->
-  <div class="modal-overlay" id="modal-overlay">
-    <div class="modal-box">
-      <div class="modal-header">
-        <h3>Connect to Silent Angel Bremen</h3>
-        <button class="close-btn" onclick="closeModal()">&times;</button>
+  <!-- Comprehensive Device Discovery Modal -->
+  <div class="modal-overlay" id="discovery-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Discover Audio Streamers</h3>
+        <button class="btn-close" onclick="closeDiscoveryModal()">&times;</button>
       </div>
-      <p style="font-size: 13px; color: var(--text-muted);">
-        Enter the IP address of your Bremen SL1P or click "Scan Network" to auto-discover UPnP endpoints.
+
+      <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
+        Bremen Studio scans your local Wi-Fi / Ethernet subnet using SSDP multicast, ARP table inspection, and port probes to identify your <strong>Silent Angel Bremen SL1P</strong> automatically.
       </p>
 
-      <div class="ip-input-row">
-        <input type="text" class="input-field" id="manual-ip-input" placeholder="e.g. 192.168.1.150">
-        <button class="btn-action" onclick="connectManual()">Connect</button>
+      <div class="scan-radar" id="radar-status">
+        <div class="radar-pulse"></div>
+        <span id="radar-text">Click "Start Network Scan" to search for devices</span>
       </div>
 
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-top: 10px;">
-        <span style="font-size: 13px; font-weight:600;">Discovered Streamers</span>
-        <button class="btn-connect" onclick="triggerScan()">Scan Network</button>
+      <div style="display:flex; gap:10px;">
+        <button class="btn-connect" style="flex:1; padding:12px;" onclick="triggerDeviceScan()">
+          🔍 Start Network Scan
+        </button>
       </div>
 
-      <div class="scan-results" id="scan-list">
-        <div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 12px;">
-          Click "Scan Network" or enter IP above
+      <!-- Discovered Devices List -->
+      <div class="device-results" id="discovery-list">
+        <div style="font-size: 12px; color: var(--text-dim); text-align: center; padding: 18px;">
+          No devices scanned yet. Click "Start Network Scan" above or enter IP below.
+        </div>
+      </div>
+
+      <!-- Manual IP Fallback -->
+      <div style="border-top: 1px solid var(--border-subtle); padding-top: 14px; display:flex; flex-direction:column; gap:8px;">
+        <label style="font-size:11.5px; color:var(--text-muted); font-weight:600;">Manual IP Override (Optional)</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="manual-ip-field" placeholder="e.g. 192.168.1.150" style="flex:1; background:var(--bg-elevated); border:1px solid var(--border-subtle); border-radius:8px; padding:10px 14px; color:var(--text-main); font-family:'JetBrains Mono', monospace; font-size:13px; outline:none;">
+          <button class="btn-connect" onclick="connectManualIp()">Connect</button>
         </div>
       </div>
     </div>
@@ -1332,30 +1665,30 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
     let isPlaying = false;
     let isMuted = false;
 
-    // Polling state from backend
+    // Periodic state polling
     async function updateStatus() {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        // Connection
-        const dot = document.getElementById('status-dot');
-        const stText = document.getElementById('status-text');
-        const cardDevName = document.getElementById('card-dev-name');
-        const cardDevIp = document.getElementById('card-dev-ip');
+        // Connection indicators
+        const dot = document.getElementById('side-status-dot');
+        const stText = document.getElementById('side-status-text');
+        const devName = document.getElementById('side-dev-name');
+        const devIp = document.getElementById('side-dev-ip');
 
         if (data.connected && data.device_ip) {
           dot.className = "status-dot connected";
           stText.innerText = "Online";
-          cardDevName.innerText = data.device_name;
-          cardDevIp.innerText = data.device_ip;
+          devName.innerText = data.device_name;
+          devIp.innerText = data.device_ip;
         } else {
           dot.className = "status-dot";
           stText.innerText = data.device_ip ? "Connecting..." : "Disconnected";
-          if (data.device_ip) cardDevIp.innerText = data.device_ip;
+          if (data.device_ip) devIp.innerText = data.device_ip;
         }
 
-        // Transport
+        // Transport Play/Pause Icon
         isPlaying = (data.transport_state === "PLAYING");
         const playIcon = document.getElementById('play-icon');
         if (isPlaying) {
@@ -1364,14 +1697,14 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           playIcon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
         }
 
-        // Track metadata
+        // Metadata
         document.getElementById('stage-title').innerText = data.track_title;
         document.getElementById('stage-artist').innerText = data.track_artist;
         document.getElementById('stage-album').innerText = data.track_album;
-        document.getElementById('mini-title').innerText = data.track_title;
-        document.getElementById('mini-artist').innerText = data.track_artist;
+        document.getElementById('bar-title').innerText = data.track_title;
+        document.getElementById('bar-artist').innerText = data.track_artist;
 
-        // Times & Progress
+        // Times & Scrub Progress
         document.getElementById('time-elapsed').innerText = data.rel_time;
         document.getElementById('time-total').innerText = data.track_duration;
         const curSec = parseTimeToSec(data.rel_time);
@@ -1381,6 +1714,11 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
           document.getElementById('scrub-progress').style.width = pct + '%';
         }
 
+        // Source and telemetry
+        if (data.active_source) {
+          document.getElementById('hud-source').innerText = "Source: " + data.active_source;
+        }
+
         // Volume
         if (!document.getElementById('vol-range').matches(':active')) {
           document.getElementById('vol-range').value = data.volume;
@@ -1388,7 +1726,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         }
 
       } catch (err) {
-        console.error("Poll error:", err);
+        console.error("Status polling error:", err);
       }
     }
 
@@ -1417,8 +1755,7 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       const totSec = parseTimeToSec(totText);
       if (totSec > 0) {
         const targetSec = frac * totSec;
-        const targetStr = secToTime(targetSec);
-        sendControl('seek', targetStr);
+        sendControl('seek', secToTime(targetSec));
       }
     }
 
@@ -1449,42 +1786,55 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
       sendControl('volume', parseInt(val));
     }
 
-    // Modal logic
-    function openModal() {
-      document.getElementById('modal-overlay').style.display = 'flex';
-    }
-
-    function closeModal() {
-      document.getElementById('modal-overlay').style.display = 'none';
-    }
-
-    async function connectManual() {
-      const ip = document.getElementById('manual-ip-input').value.trim();
-      if (!ip) return;
-      await fetch('/api/connect', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ip: ip, friendly_name: 'Silent Angel Bremen SL1P'})
+    function switchSource(sourceName) {
+      document.querySelectorAll('.source-pill').forEach(el => {
+        el.classList.toggle('active', el.innerText.trim().includes(sourceName.split(' ')[0]));
       });
-      closeModal();
-      updateStatus();
+      sendControl('source', sourceName);
     }
 
-    async function triggerScan() {
-      const list = document.getElementById('scan-list');
-      list.innerHTML = '<div style="font-size: 12px; color: var(--accent-gold); text-align: center; padding: 12px;">Scanning local network via SSDP...</div>';
+    // Discovery Modal Handlers
+    function openDiscoveryModal() {
+      document.getElementById('discovery-modal').style.display = 'flex';
+    }
+
+    function closeDiscoveryModal() {
+      document.getElementById('discovery-modal').style.display = 'none';
+    }
+
+    async function triggerDeviceScan() {
+      const radar = document.getElementById('radar-text');
+      const list = document.getElementById('discovery-list');
+      radar.innerText = "Scanning local subnet & SSDP renderers...";
+      list.innerHTML = '<div style="font-size:12px; color:var(--accent-gold); text-align:center; padding:20px;">Scanning network endpoints...</div>';
+
       try {
         const res = await fetch('/api/discover');
         const data = await res.json();
         list.innerHTML = '';
-        if (data.devices.length === 0) {
-          list.innerHTML = '<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 12px;">No UPnP renderers replied. Enter IP above directly.</div>';
+        radar.innerText = `Scan completed. Found ${data.devices.length} network device(s).`;
+
+        if (!data.devices || data.devices.length === 0) {
+          list.innerHTML = '<div style="font-size:12px; color:var(--text-muted); text-align:center; padding:18px;">No streaming renderers discovered. You can enter your Bremen IP directly below.</div>';
           return;
         }
+
         data.devices.forEach(d => {
           const item = document.createElement('div');
-          item.className = 'device-item';
-          item.innerHTML = `<div><strong>${d.friendly_name}</strong><br><small style="color:var(--text-muted)">${d.ip}</small></div><button class="btn-connect">Select</button>`;
+          const isBremen = d.is_bremen || d.friendly_name.includes('Bremen') || d.friendly_name.includes('Silent Angel');
+          item.className = 'device-result-item' + (isBremen ? ' bremen-match' : '');
+          item.innerHTML = `
+            <div>
+              <div style="font-weight:700; font-size:14px; color:var(--text-main); display:flex; align-items:center;">
+                ${d.friendly_name}
+                ${isBremen ? '<span class="badge-bremen">Silent Angel</span>' : ''}
+              </div>
+              <div style="font-size:11.5px; color:var(--text-muted); font-family:'JetBrains Mono', monospace; margin-top:3px;">
+                ${d.ip} ${d.method ? '• via ' + d.method : ''}
+              </div>
+            </div>
+            <button class="btn-connect" style="padding:6px 14px;">Connect</button>
+          `;
           item.onclick = async () => {
             await fetch('/api/connect', {
               method: 'POST',
@@ -1496,17 +1846,29 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
                 friendly_name: d.friendly_name
               })
             });
-            closeModal();
+            closeDiscoveryModal();
             updateStatus();
           };
           list.appendChild(item);
         });
       } catch (err) {
-        list.innerHTML = '<div style="font-size: 12px; color: var(--danger); text-align: center;">Scan failed. Check local firewall.</div>';
+        radar.innerText = "Scan encountered an error. Check local network connection.";
       }
     }
 
-    // Desktop Keyboard shortcuts
+    async function connectManualIp() {
+      const ip = document.getElementById('manual-ip-field').value.trim();
+      if (!ip) return;
+      await fetch('/api/connect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ip: ip, friendly_name: 'Silent Angel Bremen SL1P'})
+      });
+      closeDiscoveryModal();
+      updateStatus();
+    }
+
+    // Desktop Keyboard Shortcuts
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT') return;
       if (e.code === 'Space') {
@@ -1540,15 +1902,35 @@ class BremenHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(out)
 
 
-def run_server(port=8080):
-    """Starts the Bremen Studio local server."""
+def run_server(requested_port=8090, auto_open=True):
+    """Starts the Bremen Studio controller server on an available port."""
+    port = get_available_port(requested_port)
     server_address = ("", port)
     httpd = http.server.ThreadingHTTPServer(server_address, BremenHTTPHandler)
-    print(f"===========================================================", flush=True)
-    print(f" Silent Angel Bremen SL1P — Bremen Studio Web Controller   ", flush=True)
-    print(f" Running at: http://localhost:{port}                        ", flush=True)
-    print(f" Accessible from laptop browser and mobile phones on LAN    ", flush=True)
-    print(f"===========================================================", flush=True)
+    local_ip = get_local_ip()
+
+    url_local = f"http://localhost:{port}"
+    url_lan = f"http://{local_ip}:{port}"
+
+    print("=" * 66, flush=True)
+    print("  Silent Angel Bremen SL1P — Control Studio Online", flush=True)
+    print("=" * 66, flush=True)
+    print(f"  Laptop Browser:  {url_local}", flush=True)
+    print(f"  Mobile Phone:    {url_lan}", flush=True)
+    print("=" * 66, flush=True)
+    print("  Press Ctrl+C to terminate the controller.", flush=True)
+    print("=" * 66, flush=True)
+
+    if auto_open:
+        def open_browser():
+            time.sleep(0.5)
+            try:
+                webbrowser.open(url_local)
+            except Exception:
+                pass
+
+        threading.Thread(target=open_browser, daemon=True).start()
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -1557,7 +1939,11 @@ def run_server(port=8080):
 
 
 if __name__ == "__main__":
-    p = 8080
-    if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        p = int(sys.argv[1])
-    run_server(p)
+    p = 8090
+    no_open = False
+    for arg in sys.argv[1:]:
+        if arg.isdigit():
+            p = int(arg)
+        elif arg == "--no-open":
+            no_open = True
+    run_server(p, auto_open=not no_open)
