@@ -2,10 +2,33 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.bak
 
-# Local Device Configuration
+# Environment & Secrets (.env files)
+.env
+*.env
+.env.*
+!.env.example
+
+# Local Device Configuration & Credentials
 bremen_config.json
+silent_angel_config.json
+*.pem
+*.key
+*.dmp
+
+# Scratch, Debug & Audit Artifacts
+audit_*.md
+*.patch
+*.png
+inspect_*.js
+test_*.js
+test_*.py
+recovered_*.py
+script1.js
+toofifi_*.html
 
 # Environment / OS
 .DS_Store
 Thumbs.db
+

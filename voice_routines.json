@@ -1,0 +1,237 @@
+{
+  "version": "1.0.0",
+  "routines": [
+    {
+      "id": "urgent_volume_suppress",
+      "name": "Urgent Volume Suppression",
+      "category": "volume",
+      "description": "Instantly reduces volume or mutes active device when noise suppression cues are heard.",
+      "enabled": true,
+      "priority": 100,
+      "triggers": [
+        "shutup",
+        "shut up",
+        "ssshhh",
+        "shhh",
+        "be quiet",
+        "quiet please",
+        "turn the volume down",
+        "turn down the volume",
+        "turn it down",
+        "too loud",
+        "mute"
+      ],
+      "actions": [
+        {
+          "device": "active_target",
+          "command": "VOL_DOWN",
+          "param": 20,
+          "delay_ms": 0
+        }
+      ]
+    },
+    {
+      "id": "volume_boost",
+      "name": "Volume Increase",
+      "category": "volume",
+      "description": "Increases playback volume when requested by voice.",
+      "enabled": true,
+      "priority": 90,
+      "triggers": [
+        "turn it up",
+        "turn the volume up",
+        "louder",
+        "volume up",
+        "make it louder",
+        "can't hear it"
+      ],
+      "actions": [
+        {
+          "device": "active_target",
+          "command": "VOL_UP",
+          "param": 10,
+          "delay_ms": 0
+        }
+      ]
+    },
+    {
+      "id": "youtube_play_music",
+      "name": "YouTube Music & Video Playback",
+      "category": "media",
+      "description": "Opens YouTube on Google TV, sets comfortable listening volume, and executes search for requested artist, track, or genre.",
+      "enabled": true,
+      "priority": 80,
+      "triggers": [
+        "play * on youtube",
+        "put on * on youtube",
+        "listen to * on youtube",
+        "search * on youtube"
+      ],
+      "actions": [
+        {
+          "device": "google_tv",
+          "command": "APP",
+          "param": "YOUTUBE",
+          "delay_ms": 0
+        },
+        {
+          "device": "google_tv",
+          "command": "SET_VOL",
+          "param": 45,
+          "delay_ms": 800
+        },
+        {
+          "device": "google_tv",
+          "command": "SEARCH_AND_PLAY",
+          "param": "{query}",
+          "delay_ms": 2000
+        }
+      ]
+    },
+    {
+      "id": "tubi_movie_search",
+      "name": "Tubi Film Finder",
+      "category": "streaming",
+      "description": "Launches Tubi on Google TV and navigates directly to the film or genre query.",
+      "enabled": true,
+      "priority": 75,
+      "triggers": [
+        "watch a movie on tubi",
+        "watch * on tubi",
+        "find * on tubi",
+        "open tubi",
+        "search tubi for *"
+      ],
+      "actions": [
+        {
+          "device": "google_tv",
+          "command": "APP",
+          "param": "TUBI",
+          "delay_ms": 0
+        },
+        {
+          "device": "google_tv",
+          "command": "SEARCH",
+          "param": "{query}",
+          "delay_ms": 2200
+        }
+      ]
+    },
+    {
+      "id": "prime_video_search",
+      "name": "Prime Video Search",
+      "category": "streaming",
+      "description": "Opens Amazon Prime Video on Google TV and initiates search.",
+      "enabled": true,
+      "priority": 75,
+      "triggers": [
+        "watch * on prime",
+        "watch * on prime video",
+        "find * on prime video",
+        "open prime video"
+      ],
+      "actions": [
+        {
+          "device": "google_tv",
+          "command": "APP",
+          "param": "PRIME_VIDEO",
+          "delay_ms": 0
+        },
+        {
+          "device": "google_tv",
+          "command": "SEARCH",
+          "param": "{query}",
+          "delay_ms": 2500
+        }
+      ]
+    },
+    {
+      "id": "lights_brighten_dark",
+      "name": "Maximum Lumens (Darkness Complaint)",
+      "category": "lighting",
+      "description": "Responds to complaints of darkness by raising all room lights to full brightness.",
+      "enabled": true,
+      "priority": 85,
+      "triggers": [
+        "it's too dark",
+        "its too dark",
+        "too dark in here",
+        "turn on the lights",
+        "turn up the lights",
+        "lights to full",
+        "can't see anything"
+      ],
+      "actions": [
+        {
+          "device": "smart_lighting",
+          "command": "POWER",
+          "param": "ON",
+          "delay_ms": 0
+        },
+        {
+          "device": "smart_lighting",
+          "command": "BRIGHTNESS",
+          "param": 100,
+          "delay_ms": 100
+        },
+        {
+          "device": "smart_lighting",
+          "command": "COLOUR",
+          "param": "daylight_white",
+          "delay_ms": 200
+        }
+      ]
+    },
+    {
+      "id": "lights_cinema_dim",
+      "name": "Cinema Ambiance Lighting",
+      "category": "lighting",
+      "description": "Dims lighting to warm golden glow for movie viewing.",
+      "enabled": true,
+      "priority": 85,
+      "triggers": [
+        "dim the lights",
+        "movie mode",
+        "cinema mode",
+        "lights for movie",
+        "dim lighting"
+      ],
+      "actions": [
+        {
+          "device": "smart_lighting",
+          "command": "BRIGHTNESS",
+          "param": 15,
+          "delay_ms": 0
+        },
+        {
+          "device": "smart_lighting",
+          "command": "COLOUR",
+          "param": "warm_gold",
+          "delay_ms": 100
+        }
+      ]
+    },
+    {
+      "id": "lights_off",
+      "name": "Extinguish All Lights",
+      "category": "lighting",
+      "description": "Turns off all room smart lights.",
+      "enabled": true,
+      "priority": 80,
+      "triggers": [
+        "turn off the lights",
+        "turn the lights off",
+        "switch off lights",
+        "lights out"
+      ],
+      "actions": [
+        {
+          "device": "smart_lighting",
+          "command": "POWER",
+          "param": "OFF",
+          "delay_ms": 0
+        }
+      ]
+    }
+  ]
+}
